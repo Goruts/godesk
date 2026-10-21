@@ -17,6 +17,7 @@ vi.mock("../lib/api", async (importOriginal) => ({
       async (_workspaceId: string, rect: Rect): Promise<TerminalWindow> => ({ id: "new", name: "Terminal 2", ...rect, z: 2 }),
     ),
     closeTerminal: vi.fn(async () => null),
+    duplicateTerminal: vi.fn(async (_id: string, rect: Rect): Promise<TerminalWindow> => ({ id: "copy", name: "Terminal 1 2", ...rect, z: 3 })),
     terminalHasForegroundProcess: vi.fn(async () => false),
   },
 }));
@@ -129,5 +130,51 @@ describe("selected terminals", () => {
   it("Escape clears the selection", () => {
     press("Escape");
     expect(useAppStore.getState().selectedTerminalIds).toEqual([]);
+  });
+});
+
+describe("duplicate shortcut", () => {
+  const pressDuplicate = (target: EventTarget = window) => {
+    const event = new KeyboardEvent("keydown", { key: "D", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return event;
+  };
+
+  beforeEach(() => {
+    setTerminals([existing(0, 0)]);
+    useAppStore.setState({ selectedTerminalIds: [] });
+  });
+
+  it("Ctrl+Shift+D duplicates the terminal that has the keyboard and focuses the copy", async () => {
+    const win = document.createElement("div");
+    win.className = "term-window";
+    win.dataset["terminalId"] = "old";
+    const shell = document.createElement("textarea");
+    win.append(shell);
+    document.body.append(win);
+    shell.focus();
+
+    const event = pressDuplicate(shell);
+    await flush();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(api.duplicateTerminal).toHaveBeenCalledWith("old", expect.objectContaining({ width: 720, height: 440 }));
+    expect(focusTerminalView).toHaveBeenCalledWith("copy");
+    win.remove();
+  });
+
+  it("works on a single selected terminal too", async () => {
+    useAppStore.setState({ selectedTerminalIds: ["old"] });
+    pressDuplicate();
+    await flush();
+
+    expect(api.duplicateTerminal).toHaveBeenCalledWith("old", expect.anything());
+  });
+
+  it("leaves the keys alone when no terminal is current", () => {
+    const event = pressDuplicate();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(api.duplicateTerminal).not.toHaveBeenCalled();
   });
 });

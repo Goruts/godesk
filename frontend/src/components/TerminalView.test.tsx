@@ -274,12 +274,22 @@ describe("TerminalView", () => {
 
   it("says so when the clipboard cannot be read, instead of doing nothing", async () => {
     useAppStore.setState({ toast: null });
-    vi.mocked(readClipboardText).mockRejectedValueOnce(new Error("NotAllowedError"));
+    vi.mocked(readClipboardText).mockRejectedValueOnce(new Error("clipboard is empty"));
     await mount();
     await act(async () => void term().keyHandler!(new KeyboardEvent("keydown", { key: "V", ctrlKey: true, shiftKey: true })));
 
     expect(term().pasted).toEqual([]);
-    expect(useAppStore.getState().toast).toBe("Paste failed: NotAllowedError");
+    expect(useAppStore.getState().toast).toBe("Can't paste: clipboard is empty");
+  });
+
+  it("explains a clipboard the webview refuses in plain words", async () => {
+    useAppStore.setState({ toast: null });
+    const refused = new DOMException("The request is not allowed by the user agent or the platform", "NotAllowedError");
+    vi.mocked(readClipboardText).mockRejectedValueOnce(refused);
+    await mount();
+    await act(async () => void term().keyHandler!(new KeyboardEvent("keydown", { key: "V", ctrlKey: true, shiftKey: true })));
+
+    expect(useAppStore.getState().toast).toBe("Can't paste: this webview blocks clipboard access.");
   });
 
   it("stops listening and disposes xterm on unmount", async () => {

@@ -815,8 +815,30 @@ button.menu-row:hover {
   opacity: 0;
 }
 
+/* Title bar actions other than close: shown with ×, quieter on hover. */
+.term-action {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.term-action:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
 .term-window:hover .term-close,
-.term-window:focus-within .term-close {
+.term-window:focus-within .term-close,
+.term-window:hover .term-action,
+.term-window:focus-within .term-action {
   opacity: 1;
 }
 
