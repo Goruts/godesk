@@ -67,6 +67,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn run() {
     let app = tauri::Builder::default()
+        // WebKitGTK rejects navigator.clipboard even inside a key press, so
+        // terminal copy/paste reads and writes the clipboard from Rust.
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
