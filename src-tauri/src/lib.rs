@@ -79,6 +79,7 @@ pub fn run() {
             commands::set_active_workspace,
             commands::update_camera,
             commands::create_terminal,
+            commands::duplicate_terminal,
             commands::close_terminal,
             commands::rename_terminal,
             commands::update_terminal_rect,

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -47,8 +47,20 @@ pub struct SpawnRequest<'a> {
     pub terminal_id: &'a str,
     pub terminal_name: &'a str,
     pub workspace_id: &'a str,
+    /// Where the shell starts; [`PtyConfig::home`] when `None`.
+    pub cwd: Option<&'a Path>,
     pub cols: u16,
     pub rows: u16,
+}
+
+/// What a terminal is doing, so a copy of it can do the same: the working
+/// directory of its foreground program (or of its idle shell), and that
+/// program's argv. Empty when it cannot be read, which is always the case
+/// outside Linux.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Activity {
+    pub cwd: Option<PathBuf>,
+    pub program: Option<Vec<String>>,
 }
 
 struct Session {
@@ -196,7 +208,7 @@ impl PtyManager {
         let pair = native_pty_system().openpty(size(req.cols, req.rows)).map_err(pty_err)?;
 
         let mut cmd = shell_command(&self.inner.config);
-        cmd.cwd(&self.inner.config.home);
+        cmd.cwd(req.cwd.unwrap_or(&self.inner.config.home));
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("GODESK_TERMINAL_ID", req.terminal_id);
@@ -284,6 +296,37 @@ impl PtyManager {
         }
     }
 
+    /// What the terminal is running: the foreground program's argv and
+    /// working directory, or the idle shell's working directory. Uses the
+    /// same foreground test as [`Self::has_foreground_process`].
+    pub fn activity(&self, terminal_id: &str) -> Activity {
+        let Ok(session) = self.session(terminal_id) else {
+            return Activity::default();
+        };
+        if !session.alive.load(Ordering::SeqCst) {
+            return Activity::default();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let leader = session.master.lock().expect("master lock poisoned").process_group_leader();
+            let shell = session.pid.and_then(|pid| libc::pid_t::try_from(pid).ok());
+            match (leader, shell) {
+                (Some(leader), Some(shell)) if leader != shell => {
+                    // The job may have ended in between: then this is a shell.
+                    let program = proc_cmdline(leader);
+                    let cwd = proc_cwd(leader).or_else(|| proc_cwd(shell));
+                    Activity { cwd, program }
+                }
+                (_, Some(shell)) => Activity { cwd: proc_cwd(shell), program: None },
+                _ => Activity::default(),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Activity::default()
+        }
+    }
+
     /// Stops the shell (see [`Session::terminate`]) and forgets the session.
     pub fn close(&self, terminal_id: &str) {
         let session = self.inner.sessions.lock().expect("sessions lock poisoned").remove(terminal_id);
@@ -299,6 +342,43 @@ impl PtyManager {
             session.terminate();
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn proc_cwd(pid: libc::pid_t) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok().filter(|dir| dir.is_dir())
+}
+
+/// A process's argv. `None` if it is gone, unreadable or not UTF-8.
+#[cfg(target_os = "linux")]
+fn proc_cmdline(pid: libc::pid_t) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    // Programs that rename themselves (node's process.title) pad with NULs.
+    let end = raw.iter().rposition(|&b| b != 0)? + 1;
+    raw[..end].split(|&b| b == 0).map(|arg| String::from_utf8(arg.to_vec()).ok()).collect()
+}
+
+/// `argv` as one line for a POSIX shell (sh, bash, zsh; fish reads it the
+/// same way), each argument single-quoted unless it is plainly safe, so no
+/// argument can expand or start another command. `None` when an argument
+/// holds a control character: it would reach the shell's line editor as a
+/// key press (Enter, Ctrl+C…) that no quoting can neutralize.
+pub fn command_line(argv: &[String]) -> Option<String> {
+    if argv.is_empty() || argv.iter().any(|arg| arg.chars().any(char::is_control)) {
+        return None;
+    }
+    let quoted: Vec<String> = argv
+        .iter()
+        .map(|arg| {
+            let safe = |c: char| c.is_ascii_alphanumeric() || "@%+:,./_-".contains(c);
+            if !arg.is_empty() && arg.chars().all(safe) {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', r"'\''"))
+            }
+        })
+        .collect();
+    Some(quoted.join(" "))
 }
 
 fn spawn_writer(id: &str, mut writer: Box<dyn Write + Send>, input: mpsc::Receiver<Vec<u8>>) {
@@ -390,7 +470,14 @@ mod tests {
     }
 
     fn spawn(pty: &PtyManager, id: &str) {
-        let req = SpawnRequest { terminal_id: id, terminal_name: "Agent One", workspace_id: "ws", cols: 80, rows: 24 };
+        let req = SpawnRequest {
+            terminal_id: id,
+            terminal_name: "Agent One",
+            workspace_id: "ws",
+            cwd: None,
+            cols: 80,
+            rows: 24,
+        };
         pty.spawn(&req).unwrap();
     }
 
@@ -449,6 +536,37 @@ mod tests {
         let expected = format!("[t4:{}]", home.canonicalize().unwrap().display());
         assert!(eventually(|| recorder.output_contains(&expected)));
         pty.close("t4");
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|&a| a.to_owned()).collect()
+    }
+
+    #[test]
+    fn command_line_quotes_everything_a_shell_would_expand() {
+        assert_eq!(command_line(&argv(&["claude", "--model", "opus-5.5"])).unwrap(), "claude --model opus-5.5");
+        assert_eq!(
+            command_line(&argv(&["codex", "", "fix it", "$(rm -rf ~)", "it's", "a;b", "~", "*", "=cmd"])).unwrap(),
+            r#"codex '' 'fix it' '$(rm -rf ~)' 'it'\''s' 'a;b' '~' '*' '=cmd'"#
+        );
+    }
+
+    #[test]
+    fn command_line_refuses_control_characters_and_empty_argv() {
+        assert_eq!(command_line(&[]), None);
+        // Each would act as a key press in the shell's line editor.
+        for arg in ["a\rb", "a\nb", "\u{3}", "\u{1b}[A", "\u{7f}"] {
+            assert_eq!(command_line(&argv(&["vim", arg])), None, "{arg:?}");
+        }
+    }
+
+    /// The quoted line, run by a real shell, gives back the same argv.
+    #[test]
+    fn command_line_round_trips_through_sh() {
+        let original = argv(&["printf", "[%s]", "", "two words", "it's", "$HOME", "`id`", "\\", "\"q\""]);
+        let line = command_line(&original).unwrap();
+        let out = std::process::Command::new("/bin/sh").args(["-c", &line]).output().unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "[][two words][it's][$HOME][`id`][\\][\"q\"]");
     }
 
     fn group_exists(group: libc::pid_t) -> bool {

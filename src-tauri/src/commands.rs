@@ -3,6 +3,8 @@
 //!
 //! [`Model`]: crate::state::Model
 
+use std::path::Path;
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tauri::State;
@@ -10,7 +12,7 @@ use tauri::State;
 use crate::core::{Core, now_ms};
 use crate::error::{AppError, AppResult};
 use crate::model::{AppSnapshot, AttachResult, Camera, Link, Rect, TerminalWindow, Workspace};
-use crate::pty::{DEFAULT_COLS, DEFAULT_ROWS, SpawnRequest};
+use crate::pty::{DEFAULT_COLS, DEFAULT_ROWS, SpawnRequest, command_line};
 
 impl Core {
     fn mutate<T>(&self, change: impl FnOnce(&mut crate::state::Model) -> AppResult<T>) -> AppResult<T> {
@@ -21,13 +23,45 @@ impl Core {
 
     /// Starts the shell of a terminal that exists in the model.
     pub fn spawn_terminal(&self, terminal_id: &str, cols: u16, rows: u16) -> AppResult<()> {
+        self.spawn_terminal_in(terminal_id, None, cols, rows)
+    }
+
+    /// Like [`Self::spawn_terminal`], starting in `cwd` instead of home.
+    fn spawn_terminal_in(&self, terminal_id: &str, cwd: Option<&Path>, cols: u16, rows: u16) -> AppResult<()> {
         let (name, workspace_id) = {
             let model = self.shared.model();
             let terminal = model.terminal(terminal_id).ok_or_else(|| AppError::terminal(terminal_id))?;
             let workspace = model.workspace_of(terminal_id).expect("terminal belongs to a workspace");
             (terminal.name.clone(), workspace.id.clone())
         };
-        self.ptys.spawn(&SpawnRequest { terminal_id, terminal_name: &name, workspace_id: &workspace_id, cols, rows })
+        self.ptys.spawn(&SpawnRequest {
+            terminal_id,
+            terminal_name: &name,
+            workspace_id: &workspace_id,
+            cwd,
+            cols,
+            rows,
+        })
+    }
+
+    /// Adds a copy of `source_id` at `rect` (see [`duplicate_terminal`]).
+    pub(crate) fn duplicate_terminal(&self, source_id: &str, rect: Rect) -> AppResult<TerminalWindow> {
+        let terminal = self.mutate(|m| m.duplicate_terminal(source_id, rect))?;
+        let activity = self.ptys.activity(source_id);
+        if let Err(err) = self.spawn_terminal_in(&terminal.id, activity.cwd.as_deref(), DEFAULT_COLS, DEFAULT_ROWS) {
+            self.mutate(|m| m.remove_terminal(&terminal.id))?;
+            return Err(err);
+        }
+        // Typed into the new shell, so the program runs inside a shell like
+        // the source's and the shell stays when it exits. The tty holds the
+        // line until the shell is ready to read it. If that fails the copy
+        // is still a working shell, so it is returned rather than lost.
+        if let Some(line) = activity.program.as_deref().and_then(command_line)
+            && let Err(err) = self.ptys.write(&terminal.id, format!("{line}\r").into_bytes())
+        {
+            eprintln!("godesk: cannot start the program in terminal {}: {err}", terminal.id);
+        }
+        Ok(terminal)
     }
 
     fn close_terminals(&self, terminal_ids: &[String]) {
@@ -89,6 +123,16 @@ pub fn create_terminal(core: State<'_, Core>, workspace_id: String, rect: Rect) 
         return Err(err);
     }
     Ok(terminal)
+}
+
+/// Opens a copy of a terminal: same workspace, a name derived from the
+/// source's, and a shell in the source's working directory that starts the
+/// program the source runs in its foreground, if any. Links are not copied.
+/// Directory and program are read on Linux only; elsewhere the copy is a
+/// shell in home.
+#[tauri::command]
+pub fn duplicate_terminal(core: State<'_, Core>, terminal_id: String, rect: Rect) -> AppResult<TerminalWindow> {
+    core.duplicate_terminal(&terminal_id, rect)
 }
 
 /// Removes a terminal, its links, and stops its shell.
