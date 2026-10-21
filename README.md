@@ -105,6 +105,7 @@ El frontend llama con `invoke` a estos `#[tauri::command]`. Todos validan en `st
 | `set_active_workspace` | `workspaceId` | nada |
 | `update_camera` | `workspaceId`, `camera` | nada |
 | `create_terminal` | `workspaceId`, `rect` | `TerminalWindow`, con su shell ya arrancada |
+| `duplicate_terminal` | `terminalId`, `rect` | `TerminalWindow` copia, en el workspace del origen y con nombre `<origen> N` (ver abajo) |
 | `close_terminal` | `terminalId` | nada. Borra también sus links |
 | `rename_terminal` | `terminalId`, `name` | nada |
 | `update_terminal_rect` | `terminalId`, `rect` | `Rect` saneado (mínimo 320 × 200) |
@@ -225,6 +226,7 @@ El MVP se desarrolló y verificó en **Linux** (Arch, WebKitGTK 2.52). El códig
 - **Pellizco de zoom en el trackpad.** En macOS se usan los eventos `gesture*` de WebKit y en Windows WebView2 lo entrega como `ctrl + rueda`; ambos casos están contemplados pero sin verificar. En **Linux**, WebKitGTK haría zoom de toda la página sin avisar a JS. Por eso el backend (`src-tauri/src/pinch.rs`) pone un `GtkGestureZoom` en fase de captura sobre la ventana: reclama el gesto antes que WebKit y lo reenvía como evento `canvas-pinch`. El lienzo hace zoom anclado en el centro del pellizco y la interfaz conserva su tamaño. Está verificado con pellizcos sintéticos de GDK; falta probarlo con un touchpad físico. **Ctrl + rueda** sigue funcionando en todas las plataformas.
 - **Renderizado.** Se usa el renderer WebGL de xterm si está disponible. Si falta WebGL o se pierde el contexto, xterm vuelve a su renderer DOM; los navegadores limitan los contextos WebGL vivos a unos 16. xterm 6 ya no incluye el addon de canvas, por eso el respaldo es DOM. El texto WebGL se ve algo borroso con zoom por encima del 100 %; pon `USE_WEBGL = false` en `TerminalView.tsx` si prefieres nitidez a rendimiento.
 - **TUIs a pantalla completa.** Al volver a un workspace, el buffer reproduce los bytes en bruto; un programa a pantalla completa se ve bien cuando vuelve a redibujarse (en su siguiente actualización o redimensionado).
+- **Duplicar terminal.** `duplicate_terminal` abre la shell nueva en el directorio de trabajo del programa en primer plano del origen (o, si no hay ninguno, en el de su shell). Si hay un programa en primer plano, por ejemplo un agente, escribe su `argv` en la shell nueva, con cada argumento entre comillas simples, y pulsa Enter. Así el programa corre dentro de una shell y la shell sigue abierta cuando termina. Si algún argumento tiene caracteres de control, solo se abre la shell, porque el editor de línea los tomaría como teclas. Directorio y programa se leen de `/proc`, así que solo funciona en **Linux**. En macOS y Windows la copia es una shell en el directorio personal. No se copian los links ni el historial. Al reiniciar la app, la copia arranca en el directorio personal, como cualquier terminal.
 - **Procesos.** Al cerrar la app se cierran todas las shells; no hay procesos en segundo plano que sobrevivan.
 
 ## Tests y verificación

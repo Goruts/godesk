@@ -213,19 +213,26 @@ mod tests {
             .any(|l| l.source_id == source && l.target_id == target && l.kind == LinkKind::Detected)
     }
 
-    #[test]
-    fn shell_output_and_relayed_input_create_detected_links() {
-        let dir = tempfile::tempdir().unwrap();
+    /// The backend with `/bin/sh` shells that start in `home`, and a
+    /// recorder in place of the Tauri app.
+    fn backend(home: &std::path::Path) -> (Arc<Recorder>, Arc<Shared>, PtyManager) {
         let recorder = Arc::new(Recorder::default());
         let model = Arc::new(Mutex::new(Model::default()));
         let shared = Arc::new(Shared {
             events: Box::new(recorder.clone()),
-            persister: Persister::spawn(dir.path().join("state.json"), model.clone()),
+            persister: Persister::spawn(home.join("state.json"), model.clone()),
             model,
             detector: Mutex::new(LinkDetector::default()),
         });
-        let config = PtyConfig { home: dir.path().to_owned(), shell_override: Some(vec!["/bin/sh".into()]) };
+        let config = PtyConfig { home: home.to_owned(), shell_override: Some(vec!["/bin/sh".into()]) };
         let ptys = PtyManager::new(config, Arc::new(CoreSink(shared.clone())));
+        (recorder, shared, ptys)
+    }
+
+    #[test]
+    fn shell_output_and_relayed_input_create_detected_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let (recorder, shared, ptys) = backend(dir.path());
 
         let rect = Rect { x: 0.0, y: 0.0, width: 640.0, height: 400.0 };
         let (ws, planner, coder) = {
@@ -238,7 +245,8 @@ mod tests {
             (ws, planner, coder)
         };
         for (id, name) in [(&planner, "planner"), (&coder, "coder")] {
-            let req = SpawnRequest { terminal_id: id, terminal_name: name, workspace_id: &ws, cols: 80, rows: 24 };
+            let req =
+                SpawnRequest { terminal_id: id, terminal_name: name, workspace_id: &ws, cwd: None, cols: 80, rows: 24 };
             ptys.spawn(&req).unwrap();
         }
 
@@ -266,6 +274,54 @@ mod tests {
             recorder.payloads(&pty_output_event(&coder)).iter().map(|p| p["seq"].as_u64().unwrap()).collect();
         assert!(seqs.windows(2).all(|w| w[0] < w[1]));
 
+        ptys.close_all();
+    }
+
+    /// A copy starts where the source is and runs what it runs: first an
+    /// idle shell that changed directory, then a foreground program whose
+    /// arguments need quoting. Directory and argv come from /proc.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn duplicate_reopens_the_source_directory_and_foreground_program() {
+        use crate::pty::Activity;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("my project");
+        std::fs::create_dir(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let (_, shared, ptys) = backend(dir.path());
+        let core = Core { shared: shared.clone(), ptys: ptys.clone() };
+
+        let rect = Rect { x: 0.0, y: 0.0, width: 640.0, height: 400.0 };
+        let source = {
+            let mut m = shared.model();
+            let ws = m.active_workspace_id().to_owned();
+            let id = m.add_terminal(&ws, rect).unwrap().id;
+            m.rename_terminal(&id, "planner").unwrap();
+            id
+        };
+        core.spawn_terminal(&source, 80, 24).unwrap();
+
+        ptys.write(&source, b"cd 'my project'\n".to_vec()).unwrap();
+        assert!(eventually(|| ptys.activity(&source).cwd.as_deref() == Some(project.as_path())));
+        let shell_copy = core.duplicate_terminal(&source, rect).unwrap();
+        assert_eq!(shell_copy.name, "planner 2");
+        let idle_shell = Activity { cwd: Some(project.clone()), program: None };
+        assert!(eventually(|| ptys.activity(&shell_copy.id) == idle_shell));
+
+        // `; :` keeps sh from exec'ing sleep, so sh itself, with these
+        // arguments, leads the foreground job.
+        ptys.write(&source, b"sh -c 'sleep 30; :' x \"it's \\$HOME; \\`id\\`\"\n".to_vec()).unwrap();
+        assert!(eventually(|| ptys.has_foreground_process(&source).unwrap_or(false)));
+        let running = ptys.activity(&source);
+        let argv = ["sh", "-c", "sleep 30; :", "x", "it's $HOME; `id`"].map(String::from).to_vec();
+        assert_eq!(running, Activity { cwd: Some(project.clone()), program: Some(argv) });
+
+        let program_copy = core.duplicate_terminal(&source, rect).unwrap();
+        assert_eq!(program_copy.name, "planner 3");
+        assert!(eventually(|| ptys.activity(&program_copy.id) == running));
+
+        assert!(core.duplicate_terminal("missing", rect).is_err());
         ptys.close_all();
     }
 }
