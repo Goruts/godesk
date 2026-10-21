@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Link } from "../bindings/Link";
+import type { Rect } from "../bindings/Rect";
 import type { TerminalWindow } from "../bindings/TerminalWindow";
 import type { Workspace } from "../bindings/Workspace";
+import { viewport } from "../canvas/viewport";
 import { api } from "../lib/api";
 import { useAppStore } from "./appStore";
 
@@ -13,6 +15,7 @@ vi.mock("../lib/api", async (importOriginal) => ({
     renameWorkspace: vi.fn(async () => null),
     deleteWorkspace: vi.fn(async () => "w2"),
     createTerminal: vi.fn(),
+    duplicateTerminal: vi.fn(async (_id: string, rect: Rect) => ({ id: "copy", name: "t1 2", ...rect, z: 2 })),
     closeTerminal: vi.fn(async () => null),
     updateTerminalRect: vi.fn(),
   },
@@ -174,5 +177,45 @@ describe("terminal selection", () => {
 
     expect(main().terminals.map((t) => t.id)).toEqual(["t1"]);
     expect(state().selectedTerminalIds).toEqual(["t1"]);
+  });
+});
+
+describe("duplicateTerminal", () => {
+  beforeEach(() => {
+    // 1000×800 on screen at zoom 1: the canvas area (0, 0)–(1000, 800).
+    viewport.setBounds({ left: 0, top: 0, width: 1000, height: 800 });
+    viewport.load("w1", { x: 0, y: 0, zoom: 1 });
+  });
+
+  it("opens the copy right beside the source, same size, when that spot is free and on screen", async () => {
+    useAppStore.setState({ workspaces: [workspace("w1", "Main", [{ ...terminal("t1"), width: 400, height: 300 }])] });
+    const copy = await state().duplicateTerminal("t1");
+
+    expect(api.duplicateTerminal).toHaveBeenCalledWith("t1", { x: 424, y: 0, width: 400, height: 300 });
+    expect(copy?.id).toBe("copy");
+    expect(main().terminals.map((t) => t.id)).toEqual(["t1", "copy"]);
+  });
+
+  it("falls back to the center of the view, same size, when the spot beside is off screen", async () => {
+    await state().duplicateTerminal("t1");
+
+    // Right of t1 would end at 624 + 600 > 1000.
+    expect(api.duplicateTerminal).toHaveBeenCalledWith("t1", { x: 200, y: 200, width: 600, height: 400 });
+  });
+
+  it("falls back to the center of the view when another window already sits beside it", async () => {
+    const small = { ...terminal("t1"), width: 300, height: 200 };
+    useAppStore.setState({ workspaces: [workspace("w1", "Main", [small, { ...small, id: "t2", x: 400 }])] });
+    await state().duplicateTerminal("t1");
+
+    expect(api.duplicateTerminal).toHaveBeenCalledWith("t1", { x: 350, y: 300, width: 300, height: 200 });
+  });
+
+  it("resolves to null and explains why when the backend refuses", async () => {
+    vi.mocked(api.duplicateTerminal).mockRejectedValueOnce("terminal t1 not found");
+
+    await expect(state().duplicateTerminal("t1")).resolves.toBeNull();
+    expect(main().terminals.map((t) => t.id)).toEqual(["t1", "t2"]);
+    expect(state().toast).toBe("terminal t1 not found");
   });
 });

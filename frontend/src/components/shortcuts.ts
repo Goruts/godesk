@@ -4,6 +4,20 @@ import { useAppStore } from "../store/appStore";
 import { confirmDialog, useDialogStore } from "../store/dialogStore";
 import { focusTerminalView } from "./TerminalView";
 
+/** Opens a copy of a terminal beside it (same folder, same program) and focuses it. */
+export async function openDuplicate(terminalId: string): Promise<void> {
+  const copy = await useAppStore.getState().duplicateTerminal(terminalId);
+  if (copy) focusTerminalView(copy.id);
+}
+
+/** The terminal a shortcut acts on: the one with keyboard focus, else a lone selected one. */
+function currentTerminalId(): string | null {
+  const focused = document.activeElement?.closest<HTMLElement>(".term-window")?.dataset["terminalId"];
+  if (focused) return focused;
+  const selected = useAppStore.getState().selectedTerminalIds;
+  return selected.length === 1 ? selected[0]! : null;
+}
+
 /** Creates a terminal in the center of the view and gives it keyboard focus. */
 export async function openNewTerminal(): Promise<void> {
   const terminal = await useAppStore.getState().createTerminal();
@@ -47,7 +61,8 @@ export async function closeSelectedTerminals(): Promise<void> {
 
 /**
  * Global shortcuts, registered in the capture phase so they win over xterm:
- * Ctrl/Cmd+Shift+T opens a terminal. Outside text fields and terminals,
+ * Ctrl/Cmd+Shift+T opens a terminal, Ctrl/Cmd+Shift+D duplicates the
+ * focused one. Outside text fields and terminals,
  * Delete/Backspace closes the selected terminals or removes the selected
  * link, and Escape clears the selection.
  */
@@ -58,6 +73,14 @@ export function installShortcuts(): () => void {
       e.stopPropagation();
       // Holding the keys must not open a terminal per auto-repeat.
       if (!e.repeat) void openNewTerminal();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "d") {
+      const id = currentTerminalId();
+      if (!id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) void openDuplicate(id);
       return;
     }
     if (isTypingTarget(e.target) || useDialogStore.getState().pending) return;
