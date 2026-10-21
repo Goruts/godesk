@@ -134,21 +134,26 @@ function loadRenderer(term: Terminal): void {
  * native paste of their own, which would paste twice.
  */
 function clipboardKeys(term: Terminal) {
-  const fail = (action: string) => (error: unknown) =>
-    useAppStore.getState().notify(`${action} failed: ${errorMessage(error)}`);
+  const fail = (action: "copy" | "paste") => (error: unknown) => {
+    // WebKitGTK's wording for a refused clipboard is long and vague.
+    const blocked = error instanceof DOMException && error.name === "NotAllowedError";
+    useAppStore
+      .getState()
+      .notify(blocked ? `Can't ${action}: this webview blocks clipboard access.` : `Can't ${action}: ${errorMessage(error)}`);
+  };
   return (e: KeyboardEvent): boolean => {
     if (e.type !== "keydown" || !(e.ctrlKey || e.metaKey) || !e.shiftKey) return true;
     const key = e.key.toLowerCase();
     if (key === "c" && term.hasSelection()) {
       e.preventDefault();
-      writeClipboardText(term.getSelection()).catch(fail("Copy"));
+      writeClipboardText(term.getSelection()).catch(fail("copy"));
       return false;
     }
     if (key === "v") {
       e.preventDefault();
       readClipboardText()
         .then((text) => term.paste(text))
-        .catch(fail("Paste"));
+        .catch(fail("paste"));
       return false;
     }
     return true;
