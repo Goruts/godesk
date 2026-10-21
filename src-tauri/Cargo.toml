@@ -1,0 +1,37 @@
+[package]
+name = "godesk"
+version = "0.1.0"
+description = "Infinite canvas of real terminals for running coding agents side by side"
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+name = "godesk_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.9"
+ts-rs = "12"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
+[target."cfg(target_os = \"linux\")".dependencies]
+gtk = "0.18"

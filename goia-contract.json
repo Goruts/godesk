@@ -1,0 +1,54 @@
+{
+  "parts": {
+    "scaffold_modelo": [
+      "package.json",
+      "package-lock.json",
+      ".gitignore",
+      "src-tauri/Cargo.toml",
+      "src-tauri/Cargo.lock",
+      "src-tauri/build.rs",
+      "src-tauri/rustfmt.toml",
+      "src-tauri/.cargo/config.toml",
+      "src-tauri/tauri.conf.json",
+      "src-tauri/capabilities/",
+      "src-tauri/icons/",
+      "src-tauri/src/main.rs",
+      "src-tauri/src/lib.rs",
+      "src-tauri/src/error.rs",
+      "src-tauri/src/model.rs",
+      "frontend/src/bindings/",
+      "frontend/index.html",
+      "frontend/package.json",
+      "frontend/package-lock.json",
+      "frontend/tsconfig.json",
+      "frontend/vite.config.ts",
+      "frontend/vitest.config.ts",
+      "frontend/src/main.tsx"
+    ],
+    "backend": [
+      "src-tauri/src/commands.rs",
+      "src-tauri/src/core.rs",
+      "src-tauri/src/links.rs",
+      "src-tauri/src/persist.rs",
+      "src-tauri/src/pinch.rs",
+      "src-tauri/src/pty.rs",
+      "src-tauri/src/scrollback.rs",
+      "src-tauri/src/state.rs",
+      "src-tauri/src/text.rs"
+    ],
+    "frontend": [
+      "frontend/src/App.tsx",
+      "frontend/src/styles.css",
+      "frontend/src/canvas/",
+      "frontend/src/components/",
+      "frontend/src/lib/",
+      "frontend/src/store/"
+    ],
+    "docs": [
+      "README.md"
+    ],
+    "workspace": [
+      "goia-contract.json"
+    ]
+  }
+}
