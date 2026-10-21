@@ -16,6 +16,7 @@ const ZOOM_STEP = 1.2;
 
 const SHORTCUTS: Array<[action: string, keys: string]> = [
   ["New terminal", `${MOD_KEY} + Shift + T`],
+  ["Duplicate a terminal (folder and program)", `${MOD_KEY} + Shift + D`],
   ["Pan", "Scroll, middle-drag or Space + drag"],
   ["Zoom", `${MOD_KEY} + scroll, or pinch`],
   ["Link two terminals", "Drag a window's ● handle onto another"],

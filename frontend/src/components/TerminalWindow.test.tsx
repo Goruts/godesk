@@ -9,7 +9,7 @@ import { api } from "../lib/api";
 import { useAppStore } from "../store/appStore";
 import { useDialogStore } from "../store/dialogStore";
 import { TerminalWindow } from "./TerminalWindow";
-import { terminals } from "./TerminalView";
+import { focusTerminalView, terminals } from "./TerminalView";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -23,6 +23,7 @@ vi.mock("../lib/api", async (importOriginal) => ({
   api: {
     renameTerminal: vi.fn(async () => null),
     closeTerminal: vi.fn(async () => null),
+    duplicateTerminal: vi.fn(async () => ({ ...TERMINAL, id: "t2", name: "Terminal 1 2", x: 624, z: 2 })),
     focusTerminal: vi.fn(async () => 1),
     terminalHasForegroundProcess: vi.fn(async () => false),
   },
@@ -208,6 +209,16 @@ describe("TerminalWindow selection", () => {
   it("a Shift+double-click does not start renaming", () => {
     act(() => query(".term-title")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, shiftKey: true })));
     expect(titleInput()).toBeNull();
+  });
+});
+
+describe("TerminalWindow duplicate", () => {
+  it("its title bar button opens a copy beside it and gives the copy the keyboard", async () => {
+    await act(async () => query<HTMLButtonElement>('[aria-label="Duplicate Terminal 1"]')!.click());
+
+    expect(api.duplicateTerminal).toHaveBeenCalledWith("t1", expect.objectContaining({ width: 600, height: 400 }));
+    expect(useAppStore.getState().workspaces[0]!.terminals.map((t) => t.id)).toEqual(["t1", "t2"]);
+    expect(focusTerminalView).toHaveBeenCalledWith("t2");
   });
 });
 

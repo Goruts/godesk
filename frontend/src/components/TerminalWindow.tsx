@@ -11,6 +11,9 @@ import { viewport } from "../canvas/viewport";
 import { linkDraft } from "../canvas/linkDraft";
 import { activeWorkspace, useAppStore } from "../store/appStore";
 import { confirmDialog } from "../store/dialogStore";
+import { MOD_KEY } from "../lib/platform";
+import { DuplicateIcon } from "./icons";
+import { openDuplicate } from "./shortcuts";
 import { TerminalView, terminals } from "./TerminalView";
 
 const CURSORS: Record<ResizeDirection, string> = {
@@ -282,6 +285,15 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
             {terminal.name}
           </span>
         )}
+        <button
+          type="button"
+          className="term-action"
+          aria-label={`Duplicate ${terminal.name}`}
+          title={`Duplicate: same folder and program (${MOD_KEY}+Shift+D)`}
+          onClick={() => void openDuplicate(id)}
+        >
+          <DuplicateIcon />
+        </button>
         <button
           type="button"
           className="term-close"

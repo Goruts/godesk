@@ -6,11 +6,13 @@ import type { TerminalWindow } from "../bindings/TerminalWindow";
 import type { Workspace } from "../bindings/Workspace";
 import { api, errorMessage, events } from "../lib/api";
 import { readFlag, writeFlag } from "../lib/preferences";
+import { containsRect, intersects } from "../canvas/geometry";
 import { viewport } from "../canvas/viewport";
 
 export const DEFAULT_TERMINAL_WIDTH = 720;
 export const DEFAULT_TERMINAL_HEIGHT = 440;
 const CASCADE_OFFSET = 32;
+const DUPLICATE_GAP = 24;
 const TRANSPARENT_CANVAS_KEY = "godesk.transparentCanvas";
 
 type AppState = {
@@ -40,6 +42,8 @@ type AppActions = {
   saveCamera: (workspaceId: string, camera: Camera) => void;
 
   createTerminal: () => Promise<TerminalWindow | null>;
+  /** Opens a copy of a terminal beside it; resolves to the copy, or null on failure. */
+  duplicateTerminal: (id: string) => Promise<TerminalWindow | null>;
   closeTerminal: (id: string) => Promise<void>;
   closeTerminals: (ids: string[]) => Promise<void>;
   renameTerminal: (id: string, name: string) => Promise<void>;
@@ -93,15 +97,22 @@ export function findTerminal(state: AppState, id: string): TerminalWindow | unde
 }
 
 /** A spot centered in the visible area, cascading over windows already there. */
-function placementFor(ws: Workspace): Rect {
+function placementFor(ws: Workspace, width = DEFAULT_TERMINAL_WIDTH, height = DEFAULT_TERMINAL_HEIGHT): Rect {
   const center = viewport.center();
-  let x = Math.round(center.x - DEFAULT_TERMINAL_WIDTH / 2);
-  let y = Math.round(center.y - DEFAULT_TERMINAL_HEIGHT / 2);
+  let x = Math.round(center.x - width / 2);
+  let y = Math.round(center.y - height / 2);
   while (ws.terminals.some((t) => Math.abs(t.x - x) < 4 && Math.abs(t.y - y) < 4)) {
     x += CASCADE_OFFSET;
     y += CASCADE_OFFSET;
   }
-  return { x, y, width: DEFAULT_TERMINAL_WIDTH, height: DEFAULT_TERMINAL_HEIGHT };
+  return { x, y, width, height };
+}
+
+/** Right of the source when that spot is free and on screen; otherwise centered. Same size either way. */
+function placementBeside(ws: Workspace, source: TerminalWindow): Rect {
+  const beside = { x: source.x + source.width + DUPLICATE_GAP, y: source.y, width: source.width, height: source.height };
+  const free = !ws.terminals.some((t) => intersects(t, beside));
+  return free && containsRect(viewport.visibleRect(), beside) ? beside : placementFor(ws, source.width, source.height);
 }
 
 export const useAppStore = create<AppStore>()((set, get) => {
@@ -208,6 +219,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
         workspaces: mapWorkspace(s.workspaces, ws.id, (w) => ({ ...w, terminals: [...w.terminals, terminal] })),
       }));
       return terminal;
+    },
+
+    async duplicateTerminal(id) {
+      const ws = get().workspaces.find((w) => w.terminals.some((t) => t.id === id));
+      const source = ws?.terminals.find((t) => t.id === id);
+      if (!ws || !source) return null;
+      const created = await attempt(() => api.duplicateTerminal(id, placementBeside(ws, source)));
+      if (!created.ok) return null;
+      const copy = created.value;
+      set((s) => ({
+        workspaces: mapWorkspace(s.workspaces, ws.id, (w) => ({ ...w, terminals: [...w.terminals, copy] })),
+      }));
+      return copy;
     },
 
     async closeTerminal(id) {

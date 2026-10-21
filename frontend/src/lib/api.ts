@@ -28,6 +28,9 @@ export const api = {
 
   createTerminal: (workspaceId: string, rect: Rect) =>
     invoke<TerminalWindow>("create_terminal", { workspaceId, rect }),
+  /** Opens a copy at `rect`: same folder, and the same program if one is running in it. */
+  duplicateTerminal: (terminalId: string, rect: Rect) =>
+    invoke<TerminalWindow>("duplicate_terminal", { terminalId, rect }),
   closeTerminal: (terminalId: string) => invoke<null>("close_terminal", { terminalId }),
   renameTerminal: (terminalId: string, name: string) => invoke<null>("rename_terminal", { terminalId, name }),
   updateTerminalRect: (terminalId: string, rect: Rect) => invoke<Rect>("update_terminal_rect", { terminalId, rect }),
