@@ -88,6 +88,15 @@ export function PencilIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function DuplicateIcon({ size = 14 }: { size?: number }) {
+  return (
+    <Icon size={size}>
+      <rect x="5.75" y="5.75" width="7.5" height="7.5" rx="1.5" />
+      <path d="M10.25 3.25a1.5 1.5 0 0 0-1.5-1h-4.5a1.5 1.5 0 0 0-1.5 1.5v4.5a1.5 1.5 0 0 0 1 1.5" />
+    </Icon>
+  );
+}
+
 export function CloseIcon({ size = 14 }: { size?: number }) {
   return (
     <Icon size={size}>

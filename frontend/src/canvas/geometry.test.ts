@@ -3,6 +3,7 @@ import {
   MIN_TERMINAL_HEIGHT,
   MIN_TERMINAL_WIDTH,
   containsPoint,
+  containsRect,
   draftGeometry,
   intersects,
   linkGeometry,
@@ -98,5 +99,14 @@ describe("marquee geometry", () => {
     expect(intersects({ x: 650, y: 450, width: 100, height: 100 }, window)).toBe(true);
     expect(intersects({ x: 700, y: 100, width: 50, height: 50 }, window)).toBe(false);
     expect(intersects({ x: 0, y: 0, width: 50, height: 50 }, window)).toBe(false);
+  });
+});
+
+describe("containsRect", () => {
+  it("is true only when the inner rectangle fits entirely", () => {
+    const view = { x: 0, y: 0, width: 1000, height: 800 };
+
+    expect(containsRect(view, { x: 100, y: 100, width: 600, height: 400 })).toBe(true);
+    expect(containsRect(view, { x: 500, y: 100, width: 600, height: 400 })).toBe(false);
   });
 });

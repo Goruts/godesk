@@ -33,6 +33,42 @@ fn next_name<'a>(prefix: &str, taken: impl Iterator<Item = &'a str> + Clone) -> 
         .expect("an unused name always exists")
 }
 
+/// Name for a copy of the terminal called `source`: its base name (without a
+/// trailing number) plus the smallest unused N from 2, so "planner",
+/// "planner 2" and "planner 3" all duplicate to the next free "planner N".
+/// The base is shortened so the result still fits [`MAX_NAME_CHARS`].
+fn duplicate_name<'a>(source: &str, taken: impl Iterator<Item = &'a str> + Clone) -> String {
+    let base = match source.rsplit_once(' ') {
+        Some((base, n)) if !base.trim().is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => base,
+        _ => source,
+    };
+    (2..)
+        .map(|n| {
+            let suffix = format!(" {n}");
+            let room = MAX_NAME_CHARS - suffix.len();
+            let base: String = base.chars().take(room).collect();
+            format!("{}{suffix}", base.trim_end())
+        })
+        .find(|candidate| !taken.clone().any(|t| t == candidate))
+        .expect("an unused name always exists")
+}
+
+/// Appends a terminal on top of the workspace's stack.
+fn push_terminal(ws: &mut Workspace, name: String, rect: Rect) -> TerminalWindow {
+    let rect = rect.sanitized();
+    let terminal = TerminalWindow {
+        id: new_id(),
+        name,
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        z: ws.terminals.iter().map(|t| t.z).max().map_or(1, |z| z + 1),
+    };
+    ws.terminals.push(terminal.clone());
+    terminal
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     active_workspace_id: String,
@@ -179,18 +215,22 @@ impl Model {
 
     pub fn add_terminal(&mut self, workspace_id: &str, rect: Rect) -> AppResult<TerminalWindow> {
         let ws = self.workspace_mut(workspace_id)?;
-        let rect = rect.sanitized();
-        let terminal = TerminalWindow {
-            id: new_id(),
-            name: next_name("Terminal", ws.terminals.iter().map(|t| t.name.as_str())),
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-            z: ws.terminals.iter().map(|t| t.z).max().map_or(1, |z| z + 1),
-        };
-        ws.terminals.push(terminal.clone());
-        Ok(terminal)
+        let name = next_name("Terminal", ws.terminals.iter().map(|t| t.name.as_str()));
+        Ok(push_terminal(ws, name, rect))
+    }
+
+    /// Adds a copy of `source_id` at `rect`, in the same workspace and on
+    /// top, with a unique name derived from the source's. Links are not
+    /// copied.
+    pub fn duplicate_terminal(&mut self, source_id: &str, rect: Rect) -> AppResult<TerminalWindow> {
+        let ws = self
+            .workspaces
+            .iter_mut()
+            .find(|w| w.terminals.iter().any(|t| t.id == source_id))
+            .ok_or_else(|| AppError::terminal(source_id))?;
+        let source = &ws.terminals.iter().find(|t| t.id == source_id).expect("found above").name;
+        let name = duplicate_name(source, ws.terminals.iter().map(|t| t.name.as_str()));
+        Ok(push_terminal(ws, name, rect))
     }
 
     pub fn rename_terminal(&mut self, id: &str, name: &str) -> AppResult<()> {
@@ -350,6 +390,47 @@ mod tests {
         assert_eq!((a.name.as_str(), b.name.as_str()), ("Terminal 1", "Terminal 2"));
         assert!(b.z > a.z);
         assert_eq!((a.width, a.height), (320.0, 200.0));
+    }
+
+    #[test]
+    fn duplicates_are_numbered_from_the_source_base_name() {
+        let (mut m, ws, a, b) = model_with_two_terminals();
+        m.rename_terminal(&a, "planner").unwrap();
+        let first = m.duplicate_terminal(&a, rect()).unwrap();
+        let second = m.duplicate_terminal(&a, rect()).unwrap();
+        let of_copy = m.duplicate_terminal(&first.id, rect()).unwrap();
+        let names: Vec<_> = [&first, &second, &of_copy].iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, ["planner 2", "planner 3", "planner 4"]);
+
+        // "Terminal 2" duplicates to the next free "Terminal N".
+        assert_eq!(m.duplicate_terminal(&b, rect()).unwrap().name, "Terminal 3");
+        assert_eq!(m.workspace_of(&of_copy.id).unwrap().id, ws);
+    }
+
+    #[test]
+    fn duplicate_lands_in_the_source_workspace_on_top_without_links() {
+        let (mut m, ws, a, b) = model_with_two_terminals();
+        m.add_manual_link(&a, &b, 0).unwrap();
+        let other = m.create_workspace(None).unwrap().id;
+        m.set_active_workspace(&other).unwrap();
+        let copy = m.duplicate_terminal(&a, Rect { x: 700.0, y: 0.0, width: 600.0, height: 400.0 }).unwrap();
+        let terminals = &m.workspace_of(&a).unwrap().terminals;
+        assert_eq!(m.workspace_of(&copy.id).unwrap().id, ws);
+        assert!(terminals.iter().all(|t| t.id == copy.id || t.z < copy.z));
+        assert_eq!((copy.x, copy.width), (700.0, 600.0));
+        assert!(m.links_of(&ws).iter().all(|l| l.source_id != copy.id && l.target_id != copy.id));
+        assert_eq!(m.duplicate_terminal("nope", rect()).unwrap_err().to_string(), "terminal nope not found");
+    }
+
+    #[test]
+    fn duplicate_names_stay_within_the_length_limit() {
+        let long = "x".repeat(MAX_NAME_CHARS);
+        let name = duplicate_name(&long, std::iter::empty());
+        assert_eq!(name.chars().count(), MAX_NAME_CHARS);
+        assert!(name.ends_with("x 2"));
+        // A lone number or a trailing space is a name, not a suffix.
+        assert_eq!(duplicate_name("2026", std::iter::empty()), "2026 2");
+        assert_eq!(duplicate_name("v 1", ["v 2"].into_iter()), "v 3");
     }
 
     #[test]
