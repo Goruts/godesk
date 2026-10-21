@@ -1,0 +1,1237 @@
+/* The window itself is transparent (tauri.conf.json `transparent: true`), so
+   nothing below .app may paint an opaque background: what is not drawn here
+   shows the desktop behind Godesk. */
+:root {
+  /* Grayscale monochrome: hue is reserved for danger (destructive actions and
+     errors), so states read through lightness, weight and shape instead. */
+  --surface-1: #1b1b1d;
+  --surface-2: #252527;
+  --surface-3: #303033;
+  --border: #343437;
+  --hairline: rgb(255 255 255 / 0.08);
+  --hover: rgb(255 255 255 / 0.07);
+  --text: #ededee;
+  --muted: #8b8b90;
+  --accent: #ededee;
+  --accent-hover: #ffffff;
+  --accent-text: #ffffff;
+  /* Text and icons drawn on --accent. */
+  --on-accent: #111112;
+  --focus-ring: rgb(255 255 255 / 0.4);
+  --danger: #e0858c;
+  --danger-strong: #9e3b45;
+  --danger-bg: rgb(224 133 140 / 0.12);
+  --manual: #e4e4e7;
+  --detected: #a1a1a6;
+  --selected: #ffffff;
+  --window-bg: #141415;
+  --titlebar: #1d1d1f;
+  --radius: 10px;
+  --shadow-float: 0 8px 24px rgb(0 0 0 / 0.4);
+
+  /* Solid canvas; .app[data-canvas="transparent"] overrides these. */
+  --float: rgb(30 30 32 / 0.92);
+  --canvas-bg: #0e0e0f;
+
+  color-scheme: dark;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.app[data-canvas="transparent"] {
+  --float: rgb(24 24 26 / 0.84);
+  --canvas-bg: rgb(10 10 11 / 0.24);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+kbd {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---------- Layout ---------- */
+
+.app {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+}
+
+.main {
+  position: absolute;
+  inset: 0;
+  background: var(--canvas-bg);
+}
+
+.loading {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--muted);
+}
+
+/* ---------- Dock ---------- */
+
+/* The only chrome: everything else is canvas. Its radius is the buttons'
+   plus its padding, so the corners stay concentric. The hairline and the top
+   highlight are shadows, so they take no layout space. */
+.dock {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  background: var(--float);
+  -webkit-backdrop-filter: blur(20px) saturate(0);
+  backdrop-filter: blur(20px) saturate(0);
+  border-radius: 16px;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.06),
+    0 0 0 1px var(--hairline),
+    0 2px 6px rgb(0 0 0 / 0.3),
+    0 16px 40px rgb(0 0 0 / 0.45);
+}
+
+/* Presses on the icon land on the grip, which is the window drag region. */
+.dock-grip {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 36px;
+  margin-right: 2px;
+  color: var(--muted);
+  opacity: 0.45;
+  cursor: grab;
+  transition: opacity 120ms;
+}
+
+.dock-grip:hover {
+  opacity: 0.9;
+}
+
+.dock-grip svg {
+  pointer-events: none;
+}
+
+.dock-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0;
+  font: inherit;
+  color: var(--muted);
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  transition:
+    background 120ms,
+    color 120ms,
+    transform 80ms;
+}
+
+.dock-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.dock-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.dock-btn[aria-expanded="true"] {
+  color: var(--text);
+  background: rgb(255 255 255 / 0.11);
+}
+
+/* A toggle that is on: full-strength icon plus a dot below it. */
+.dock-btn[aria-pressed="true"] {
+  color: var(--text);
+}
+
+.dock-btn[aria-pressed="true"]::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 3px;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.dock-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.dock-btn-primary,
+.dock-btn-primary:hover:not(:disabled) {
+  color: var(--on-accent);
+  background: var(--accent);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+}
+
+.dock-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.dock-btn-workspace {
+  padding: 0 10px 0 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.dock-btn-text {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dock-btn-workspace svg:last-child {
+  color: var(--muted);
+  transition: transform 120ms;
+}
+
+.dock-btn-workspace[aria-expanded="true"] svg:last-child {
+  transform: rotate(180deg);
+}
+
+.dock-btn-danger {
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--danger);
+  background: var(--danger-bg);
+  animation: dock-pop 140ms ease-out;
+}
+
+.dock-btn-danger:hover:not(:disabled) {
+  color: #fff;
+  background: var(--danger-strong);
+}
+
+@keyframes dock-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+.dock-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: rgb(255 255 255 / 0.1);
+}
+
+/* Hover/focus label for icon-only controls (the accessible name is the
+   aria-label; this is only the visible hint). */
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 12px);
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text);
+  white-space: nowrap;
+  background: var(--surface-2);
+  border-radius: 7px;
+  box-shadow:
+    0 0 0 1px var(--hairline),
+    var(--shadow-float);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms;
+  z-index: 40;
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  transition-delay: 300ms;
+}
+
+/* ---------- Dock panels ---------- */
+
+.popover-anchor {
+  position: relative;
+}
+
+/* Same material as the dock, a little more opaque for reading. */
+.popover {
+  position: absolute;
+  bottom: calc(100% + 14px);
+  width: 300px;
+  max-height: min(70vh, 540px);
+  overflow-y: auto;
+  padding: 6px;
+  background: rgb(27 27 29 / 0.96);
+  -webkit-backdrop-filter: blur(20px) saturate(0);
+  backdrop-filter: blur(20px) saturate(0);
+  border-radius: 14px;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.05),
+    0 0 0 1px var(--hairline),
+    0 16px 48px rgb(0 0 0 / 0.55);
+  z-index: 30;
+}
+
+.popover-start {
+  left: -6px;
+}
+
+.popover-end {
+  right: -6px;
+}
+
+.popover-title {
+  margin: 12px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.popover-title:first-child {
+  margin-top: 6px;
+}
+
+.ws-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ws-item {
+  display: flex;
+  align-items: center;
+  padding-right: 4px;
+  border-radius: 8px;
+}
+
+.ws-item:hover,
+.ws-item:focus-within {
+  background: rgb(255 255 255 / 0.06);
+}
+
+.ws-select {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 34px;
+  padding: 0 8px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.ws-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.ws-item.is-active .ws-dot {
+  background: var(--accent);
+}
+
+.ws-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-count {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.ws-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  margin: 3px 4px;
+  padding: 0 8px;
+  font: inherit;
+  color: var(--text);
+  background: var(--window-bg);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  user-select: text;
+}
+
+.ws-actions {
+  display: flex;
+  gap: 1px;
+  opacity: 0;
+}
+
+.ws-item:hover .ws-actions,
+.ws-item:focus-within .ws-actions {
+  opacity: 1;
+}
+
+.ws-action {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ws-action:hover:not(:disabled) {
+  color: var(--text);
+  background: rgb(255 255 255 / 0.1);
+}
+
+.ws-action-danger:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+.ws-action:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.ws-new {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 34px;
+  margin-top: 2px;
+  padding: 0 8px;
+  font: inherit;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.ws-new:hover:not(:disabled) {
+  color: var(--text);
+  background: rgb(255 255 255 / 0.06);
+}
+
+.ws-new:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 8px;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 8px;
+}
+
+button.menu-row {
+  cursor: pointer;
+}
+
+button.menu-row:hover {
+  background: rgb(255 255 255 / 0.06);
+}
+
+.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 30px;
+  height: 18px;
+  background: var(--surface-3);
+  border-radius: 9px;
+  transition: background 120ms;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: var(--muted);
+  border-radius: 50%;
+  transition:
+    transform 120ms,
+    background 120ms;
+}
+
+[aria-checked="true"] > .switch {
+  background: var(--accent);
+}
+
+[aria-checked="true"] > .switch::after {
+  background: var(--on-accent);
+  transform: translateX(12px);
+}
+
+.segmented {
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  background: var(--surface-2);
+  border-radius: 7px;
+}
+
+.segmented button {
+  min-width: 28px;
+  height: 24px;
+  padding: 0 6px;
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.segmented button:hover {
+  background: rgb(255 255 255 / 0.08);
+}
+
+.menu-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 2px 4px 4px;
+}
+
+.menu-actions button {
+  height: 30px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.menu-actions button:hover {
+  background: var(--surface-3);
+}
+
+.menu-actions .is-danger {
+  color: var(--danger);
+}
+
+.menu-actions .is-danger:hover {
+  color: #fff;
+  background: var(--danger-strong);
+}
+
+.shortcuts {
+  margin: 0;
+  padding: 0 8px 4px;
+}
+
+.shortcut {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 5px 0;
+  font-size: 12px;
+}
+
+.shortcut dt {
+  white-space: nowrap;
+}
+
+.shortcut dd {
+  margin: 0;
+  color: var(--muted);
+  text-align: right;
+}
+
+/* ---------- Buttons ---------- */
+
+.btn {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: transparent;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-danger {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: rgb(224 133 140 / 0.3);
+}
+
+.btn-danger:hover:not(:disabled) {
+  color: #fff;
+  background: var(--danger-strong);
+}
+
+.btn-sm {
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+/* ---------- Canvas ---------- */
+
+/* No background of its own: the plain tint is .main's, so the loading screen
+   and the canvas share it. */
+.canvas {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.canvas[data-space-pan="true"],
+.canvas[data-space-pan="true"] * {
+  cursor: grab !important;
+}
+
+/* Shift+drag selection box, in screen pixels over the world. */
+.marquee {
+  position: absolute;
+  border: 1px solid rgb(255 255 255 / 0.55);
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.06);
+  pointer-events: none;
+}
+
+.world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  transform-origin: 0 0;
+  --inv-zoom: 1;
+}
+
+/* No position or z-index: a layer creates no stacking context, so windows
+   keep stacking by their own z. Hidden layers keep their layout (not
+   display: none), or xterm would refit to nothing and shrink the shell. */
+.workspace-layer[inert] {
+  visibility: hidden;
+}
+
+.canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.canvas-empty p {
+  margin: 4px 0;
+}
+
+.app[data-canvas="transparent"] .canvas-empty {
+  color: var(--text);
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.8);
+}
+
+/* While dragging/resizing/panning/linking: one shield receives everything and
+   terminals ignore the mouse. */
+.interaction-shield {
+  display: none;
+}
+
+:root[data-interacting] .interaction-shield {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  cursor: var(--interaction-cursor, default);
+}
+
+:root[data-interacting] .term-body {
+  pointer-events: none;
+}
+
+:root[data-interacting],
+:root[data-interacting] * {
+  cursor: var(--interaction-cursor, default) !important;
+}
+
+/* ---------- Terminal windows ---------- */
+
+.term-window {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  background: var(--window-bg);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 36px rgb(0 0 0 / 0.45);
+}
+
+.term-window:focus-within {
+  box-shadow:
+    0 0 0 1.5px var(--focus-ring),
+    0 16px 44px rgb(0 0 0 / 0.55);
+}
+
+.term-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  flex-shrink: 0;
+  padding: 0 4px 0 12px;
+  background: var(--titlebar);
+  border-radius: var(--radius) var(--radius) 0 0;
+  cursor: grab;
+}
+
+.term-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.term-window:focus-within .term-title {
+  color: var(--text);
+}
+
+.term-title-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--window-bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  user-select: text;
+}
+
+.term-close {
+  width: 24px;
+  height: 22px;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.term-window:hover .term-close,
+.term-window:focus-within .term-close {
+  opacity: 1;
+}
+
+.term-close:hover {
+  color: #fff;
+  background: var(--danger-strong);
+}
+
+.term-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
+.terminal-view {
+  position: absolute;
+  inset: 0;
+}
+
+.terminal-xterm {
+  position: absolute;
+  inset: 6px 4px 4px 8px;
+}
+
+.terminal-xterm .xterm {
+  height: 100%;
+}
+
+/* xterm.css paints the viewport black; it shows below the last partial row. */
+.terminal-xterm .xterm .xterm-viewport {
+  background-color: var(--window-bg);
+}
+
+.terminal-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: rgb(29 29 31 / 0.96);
+  border-top: 1px solid var(--border);
+}
+
+.terminal-overlay p {
+  margin: 0;
+  color: var(--muted);
+}
+
+/* Resize handles: edges and corners straddling the border. Sizes are in
+   screen pixels (scaled by --inv-zoom) so they stay grabbable at any zoom. */
+.term-resize {
+  position: absolute;
+  z-index: 1;
+}
+
+.term-resize-n,
+.term-resize-s {
+  left: calc(8px * var(--inv-zoom));
+  right: calc(8px * var(--inv-zoom));
+  height: calc(8px * var(--inv-zoom));
+  cursor: ns-resize;
+}
+
+.term-resize-n {
+  top: calc(-4px * var(--inv-zoom));
+}
+
+.term-resize-s {
+  bottom: calc(-4px * var(--inv-zoom));
+}
+
+.term-resize-e,
+.term-resize-w {
+  top: calc(8px * var(--inv-zoom));
+  bottom: calc(8px * var(--inv-zoom));
+  width: calc(8px * var(--inv-zoom));
+  cursor: ew-resize;
+}
+
+.term-resize-e {
+  right: calc(-4px * var(--inv-zoom));
+}
+
+.term-resize-w {
+  left: calc(-4px * var(--inv-zoom));
+}
+
+.term-resize-ne,
+.term-resize-nw,
+.term-resize-se,
+.term-resize-sw {
+  width: calc(14px * var(--inv-zoom));
+  height: calc(14px * var(--inv-zoom));
+  z-index: 2;
+}
+
+.term-resize-ne {
+  top: calc(-5px * var(--inv-zoom));
+  right: calc(-5px * var(--inv-zoom));
+  cursor: nesw-resize;
+}
+
+.term-resize-sw {
+  bottom: calc(-5px * var(--inv-zoom));
+  left: calc(-5px * var(--inv-zoom));
+  cursor: nesw-resize;
+}
+
+.term-resize-nw {
+  top: calc(-5px * var(--inv-zoom));
+  left: calc(-5px * var(--inv-zoom));
+  cursor: nwse-resize;
+}
+
+.term-resize-se {
+  bottom: calc(-5px * var(--inv-zoom));
+  right: calc(-5px * var(--inv-zoom));
+  cursor: nwse-resize;
+}
+
+/* Zoomed far out (below LOW_ZOOM) the text is unreadable and the title bar is
+   a sliver: the body lets presses through to the window, which moves it. */
+.world[data-low-zoom="true"] .term-body {
+  pointer-events: none;
+}
+
+.world[data-low-zoom="true"] .term-window {
+  cursor: grab;
+}
+
+/* Link handle on the right edge; screen-sized at any zoom, like the resize
+   handles. Hidden with the links: a new link would be invisible. */
+.term-link-handle {
+  position: absolute;
+  top: 50%;
+  right: calc(-9px * var(--inv-zoom));
+  width: calc(16px * var(--inv-zoom));
+  height: calc(16px * var(--inv-zoom));
+  margin-top: calc(-8px * var(--inv-zoom));
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: calc(2px * var(--inv-zoom)) solid var(--manual);
+  cursor: crosshair;
+  opacity: 0;
+  transition: opacity 120ms;
+  z-index: 3;
+}
+
+.term-window:hover .term-link-handle,
+:root[data-interacting] .term-link-handle {
+  opacity: 1;
+}
+
+.term-link-handle:hover {
+  background: var(--manual);
+}
+
+.world[data-links-hidden] .term-link-handle {
+  display: none;
+}
+
+/* Picked for a bulk action (Shift+click a title, Shift+drag). */
+.term-window[data-selected] {
+  box-shadow:
+    0 0 0 calc(2px * var(--inv-zoom)) var(--selected),
+    0 16px 44px rgb(0 0 0 / 0.55);
+}
+
+.term-window[data-selected] .term-title {
+  color: var(--text);
+}
+
+/* The window a link being drawn would connect to. */
+.term-window[data-link-target] {
+  box-shadow:
+    0 0 0 calc(2px * var(--inv-zoom)) var(--manual),
+    0 14px 40px rgb(0 0 0 / 0.55);
+}
+
+/* ---------- Links ---------- */
+
+.link-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.link-layer.links-hidden .link {
+  display: none;
+}
+
+.link-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: calc(14px * var(--inv-zoom));
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.link-line {
+  fill: none;
+  stroke-width: calc(2px * var(--inv-zoom));
+  stroke-linecap: round;
+  pointer-events: none;
+  transition:
+    opacity 400ms,
+    stroke 200ms;
+}
+
+/* Soft halo behind an active line (a plain stroke: CSS filters on SVG
+   shapes are not supported by every engine). */
+.link-glow {
+  fill: none;
+  stroke-width: calc(10px * var(--inv-zoom));
+  stroke-linecap: round;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 400ms;
+}
+
+.link-manual .link-line,
+.link-manual .link-glow {
+  stroke: var(--manual);
+}
+
+.link-detected .link-line,
+.link-detected .link-glow {
+  stroke: var(--detected);
+}
+
+.link-detected .link-line {
+  stroke-dasharray: calc(6px * var(--inv-zoom)) calc(5px * var(--inv-zoom));
+}
+
+.link[data-activity="idle"] .link-line {
+  opacity: 0.45;
+}
+
+.link-detected[data-activity="idle"] .link-line {
+  opacity: 0.3;
+}
+
+/* Over an unknown wallpaper, idle lines need more contrast to stay visible. */
+.app[data-canvas="transparent"] .link[data-activity="idle"] .link-line {
+  opacity: 0.75;
+}
+
+.app[data-canvas="transparent"] .link-detected[data-activity="idle"] .link-line {
+  opacity: 0.6;
+}
+
+.link[data-activity="active"] .link-line {
+  opacity: 1;
+  stroke-width: calc(3px * var(--inv-zoom));
+  stroke-dasharray: calc(10px * var(--inv-zoom)) calc(8px * var(--inv-zoom));
+  animation: link-flow 0.8s linear infinite;
+}
+
+.link[data-activity="active"] .link-glow {
+  opacity: 0.22;
+}
+
+.link.is-selected .link-line {
+  stroke: var(--selected);
+  stroke-width: calc(3px * var(--inv-zoom));
+  opacity: 1;
+}
+
+.link:hover .link-line {
+  opacity: 1;
+}
+
+@keyframes link-flow {
+  to {
+    stroke-dashoffset: calc(-18px * var(--inv-zoom));
+  }
+}
+
+.link-arrow-manual path {
+  fill: var(--manual);
+}
+
+.link-arrow-detected path {
+  fill: var(--detected);
+}
+
+.link-arrow-selected path {
+  fill: var(--selected);
+}
+
+.link-draft {
+  fill: none;
+  stroke: var(--manual);
+  stroke-width: calc(2px * var(--inv-zoom));
+  stroke-dasharray: calc(4px * var(--inv-zoom)) calc(4px * var(--inv-zoom));
+}
+
+.link-tooltip {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.4);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.link-tooltip-arrow {
+  color: var(--muted);
+}
+
+.link-tooltip-kind {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.link-tooltip-hint {
+  margin-left: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* ---------- Dialog & toast ---------- */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 0.5);
+}
+
+.dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 18px 20px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgb(0 0 0 / 0.5);
+}
+
+.dialog h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.dialog p {
+  margin: 0 0 18px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Above the dock, which shares the bottom center. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 76px;
+  transform: translateX(-50%);
+  z-index: 110;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 9px 14px;
+  background: var(--surface-2);
+  border-left: 3px solid var(--danger);
+  border-radius: 8px;
+  box-shadow:
+    0 0 0 1px var(--hairline),
+    0 10px 30px rgb(0 0 0 / 0.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .link[data-activity="active"] .link-line {
+    animation: none;
+  }
+
+  .dock-btn,
+  .dock-grip,
+  .dock-btn-workspace svg:last-child,
+  .switch,
+  .switch::after,
+  [data-tip]::after {
+    transition: none;
+  }
+
+  .dock-btn-danger {
+    animation: none;
+  }
+
+  .dock-btn:active:not(:disabled) {
+    transform: none;
+  }
+}

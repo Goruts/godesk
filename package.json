@@ -1,0 +1,17 @@
+{
+  "name": "godesk",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Infinite canvas of real terminals for running coding agents side by side",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "gen:types": "cd src-tauri && cargo test export_bindings",
+    "test": "cd src-tauri && cargo test && cd .. && npm --prefix frontend test",
+    "postinstall": "npm --prefix frontend install"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.3"
+  }
+}
