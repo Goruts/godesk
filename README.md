@@ -110,13 +110,21 @@ El frontend llama con `invoke` a estos `#[tauri::command]`. Todos validan en `st
 | `rename_terminal` | `terminalId`, `name` | nada |
 | `update_terminal_rect` | `terminalId`, `rect` | `Rect` saneado (mínimo 320 × 200) |
 | `focus_terminal` | `terminalId` | nuevo `z` |
-| `terminal_has_foreground_process` | `terminalId` | `bool` (siempre `false` en Windows) |
+| `terminal_has_foreground_process` | `terminalId` | `bool`. En Windows, si el shell tiene un programa hijo vivo |
+| `terminal_folder` | `terminalId` | carpeta del programa en primer plano (o del shell), o `null` |
 | `attach_terminal` | `terminalId`, `cols`, `rows` | `AttachResult`: `{ data: base64, seq, alive }` |
 | `restart_terminal` | `terminalId`, `cols`, `rows` | nada |
 | `write_terminal` | `terminalId`, `data` (**base64**) | nada |
 | `resize_terminal` | `terminalId`, `cols`, `rows` | nada |
 | `create_link` | `sourceId`, `targetId` | `Link` manual |
 | `delete_link` | `linkId` | nada |
+| `pick_path` | `folder` | ruta elegida en el diálogo de carpeta (o de archivo), o `null` si se cancela |
+| `list_windows` | — | `NativeWindow[]`: ventanas abiertas que se pueden traer al lienzo (solo Windows) |
+| `open_app` | `launch` (`AppLaunch`) | `EmbeddedApp`, cuando su ventana ya apareció (ver "Programas en el lienzo") |
+| `place_apps` | `placements` (`AppPlacement[]`) | nada |
+| `focus_app` | `appId` | nada |
+| `close_app` | `appId` | nada. El programa decide; el evento `app-changed` avisa cuando cerró |
+| `release_app` | `appId` | nada. Devuelve la ventana al escritorio |
 
 - Los errores llegan como un string con el mensaje (por ejemplo `the last workspace cannot be deleted`).
 - Los comandos que no devuelven nada resuelven a **`null`**, no a `undefined`. Tenlo en cuenta al distinguir éxito de error en el frontend y en los mocks de tests.
@@ -184,6 +192,16 @@ En `src-tauri/src/links.rs`, dos señales crean o refrescan un link **detectado*
 1. **Mención.** La salida de A contiene el **nombre** de B (sin distinguir mayúsculas, como palabra completa, de al menos 3 caracteres) o su **id**. Antes se quitan las secuencias de escape, y un nombre partido entre dos lecturas también cuenta.
 2. **Relay (reenvío).** El texto que se escribe en B lo produjo A en los últimos **4 s**. Cubre copiar la respuesta de un agente y pegarla o enviarla a otro. La entrada debe tener al menos 8 caracteres; se comparan sus últimos 64 tras normalizar espacios y mayúsculas.
 
+**Comando `godesk`.** Cada shell trae en su PATH un comando `godesk` para que lo que corre en una terminal (Claude Code, Codex o cualquier otro programa) llegue a otra:
+
+```
+godesk list                        # terminales del workspace y qué corre en cada una
+godesk send <terminal> <mensaje>   # escribe el mensaje en esa terminal y pulsa Enter
+godesk read <terminal> [líneas]    # imprime el final de su salida
+```
+
+Cada uso crea o refresca el link detectado (`send`: emisor → receptor; `read`: leída → lectora). El nombre se busca sin distinguir mayúsculas, o por la única terminal cuyo nombre lo contiene. Un mensaje de varias líneas se envía en una sola, y el Enter va 150 ms después para que TUIs como Claude Code lo tomen como envío y no como pegado. Detrás hay un endpoint HTTP en `127.0.0.1` (`src-tauri/src/bridge.rs`) con un token aleatorio que solo conocen las shells de Godesk (`GODESK_PORT`, `GODESK_TOKEN`). Los scripts (`godesk` para sh/Git Bash con curl, `godesk.ps1` para PowerShell y `godesk.cmd` para cmd.exe) se escriben en `<datos de la app>/bin` en cada arranque. En PowerShell corre el `.ps1`, que recibe los argumentos sin que `cmd.exe` los vuelva a partir: un mensaje con `&` o con acentos llega entero. En cmd.exe hay que entrecomillarlo con comillas dobles, porque `cmd.exe` corta la línea en el `&` antes de que el script la vea. Un agente solo lo usa si sabe que existe. En ⋯ → *Agents know the terminals by name*, Godesk agrega una nota entre marcadores `<!-- godesk:begin -->`/`<!-- godesk:end -->` a las instrucciones globales de Claude Code (`~/.claude/CLAUDE.md`) y de Codex (`~/.codex/AGENTS.md`): les dice que, si `GODESK_TERMINAL_ID` está definido, los nombres de las barras de título ("Terminal 3") son terminales del lienzo y cómo usar `godesk`. Apagarlo quita solo ese bloque (`src-tauri/src/agents.rs`).
+
 Si ya existe un link en ese sentido (manual o detectado), se refresca su actividad en vez de duplicarlo. La detección funciona también en los workspaces que no están visibles.
 
 Constantes ajustables (`links.rs`):
@@ -211,14 +229,16 @@ Es una heurística: muestra coordinación probable, no una prueba.
 
 ## Plataformas y limitaciones
 
-El MVP se desarrolló y verificó en **Linux** (Arch, WebKitGTK 2.52). El código es multiplataforma y compila para Windows (`cargo check` / `cargo clippy --target x86_64-pc-windows-gnu` sin avisos), pero no se ha ejecutado en Windows ni en macOS.
+El MVP se desarrolló y verificó en **Linux** (Arch, WebKitGTK 2.52). En **Windows 10** se verificaron duplicar terminal y los programas en el lienzo (tests en ConPTY real y la app compilada). macOS no se ha ejecutado.
 
 ### Windows
 
-- **Sin confirmación al cerrar.** La comprobación de "hay un programa en primer plano" compara el grupo de procesos en primer plano del PTY (`tcgetpgrp`) con el del shell, y ConPTY no expone ese dato. En Windows, **×** cierra la terminal directamente, aunque haya un agente trabajando.
-- **Cierre más simple.** En Unix se envía SIGHUP y, si el shell sigue vivo a los 2 s, SIGKILL a su grupo de procesos y al de primer plano. En Windows solo se termina el proceso del shell; lo que ocurra con sus procesos hijos depende de ConPTY y no está verificado.
-- **Shell:** Windows PowerShell (`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`); si no existe, `%ComSpec%` (`cmd.exe`). PowerShell 7 (`pwsh`) no se usa por defecto.
+- **Programa en primer plano.** ConPTY no expone un grupo de procesos en primer plano. `src-tauri/src/winproc.rs` toma el hijo más reciente del shell en la tabla de procesos (mirando a través de envoltorios `cmd.exe /c`, como los `.cmd` que instala npm para `claude` o `codex`) y lee su carpeta y su línea de comandos del PEB del proceso. Con eso funcionan duplicar y la confirmación al cerrar.
+- **Cierre.** Al cerrar una terminal se terminan primero los programas que lanzó su shell y después el shell, para que un agente no quede corriendo sin ventana.
+- **ConPTY propio.** La ConPTY de Windows 10 pierde líneas cuando la salida avanza más rápido de lo que dibuja: la conversación anterior de un agente no llegaba al historial y había que redimensionar la terminal para verla. Godesk instala junto a `godesk.exe` el `conpty.dll` y el `OpenConsole.exe` de Windows Terminal (`src-tauri/conpty/`, MIT, firmados por Microsoft), que `portable-pty` carga antes que el del sistema.
+- **Shell:** Windows PowerShell (`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`); si no existe, `%ComSpec%` (`cmd.exe`). PowerShell 7 (`pwsh`) no se usa por defecto. PowerShell arranca con `-NoExit -EncodedCommand` y un envoltorio de `prompt` que copia la ubicación actual a `[Environment]::CurrentDirectory`; sin eso, `cd` no cambia el directorio del proceso y una copia no sabría dónde está el shell. El `prompt` del perfil (oh-my-posh, etc.) se conserva.
 - **Requisitos:** ConPTY (Windows 10 1809 o posterior) y el runtime de WebView2 (incluido en Windows 11).
+- **Ctrl + Alt + F** (atajo global) muestra Godesk maximizado desde cualquier lado, o lo minimiza si ya está al frente. Si otro programa tiene el atajo cuando Godesk arranca, lo reintenta cada 5 s hasta que quede libre.
 - **Atajos de portapapeles:** WebView2 asocia Ctrl + Shift + V a su propio pegado. `TerminalView` cancela ese comportamiento para no pegar dos veces.
 
 ### Todas las plataformas
@@ -226,8 +246,23 @@ El MVP se desarrolló y verificó en **Linux** (Arch, WebKitGTK 2.52). El códig
 - **Pellizco de zoom en el trackpad.** En macOS se usan los eventos `gesture*` de WebKit y en Windows WebView2 lo entrega como `ctrl + rueda`; ambos casos están contemplados pero sin verificar. En **Linux**, WebKitGTK haría zoom de toda la página sin avisar a JS. Por eso el backend (`src-tauri/src/pinch.rs`) pone un `GtkGestureZoom` en fase de captura sobre la ventana: reclama el gesto antes que WebKit y lo reenvía como evento `canvas-pinch`. El lienzo hace zoom anclado en el centro del pellizco y la interfaz conserva su tamaño. Está verificado con pellizcos sintéticos de GDK; falta probarlo con un touchpad físico. **Ctrl + rueda** sigue funcionando en todas las plataformas.
 - **Renderizado.** Se usa el renderer WebGL de xterm si está disponible. Si falta WebGL o se pierde el contexto, xterm vuelve a su renderer DOM; los navegadores limitan los contextos WebGL vivos a unos 16. xterm 6 ya no incluye el addon de canvas, por eso el respaldo es DOM. El texto WebGL se ve algo borroso con zoom por encima del 100 %; pon `USE_WEBGL = false` en `TerminalView.tsx` si prefieres nitidez a rendimiento.
 - **TUIs a pantalla completa.** Al volver a un workspace, el buffer reproduce los bytes en bruto; un programa a pantalla completa se ve bien cuando vuelve a redibujarse (en su siguiente actualización o redimensionado).
-- **Duplicar terminal.** `duplicate_terminal` abre la shell nueva en el directorio de trabajo del programa en primer plano del origen (o, si no hay ninguno, en el de su shell). Si hay un programa en primer plano, por ejemplo un agente, escribe su `argv` en la shell nueva, con cada argumento entre comillas simples, y pulsa Enter. Así el programa corre dentro de una shell y la shell sigue abierta cuando termina. Si algún argumento tiene caracteres de control, solo se abre la shell, porque el editor de línea los tomaría como teclas. Directorio y programa se leen de `/proc`, así que solo funciona en **Linux**. En macOS y Windows la copia es una shell en el directorio personal. No se copian los links ni el historial. Al reiniciar la app, la copia arranca en el directorio personal, como cualquier terminal.
-- **Procesos.** Al cerrar la app se cierran todas las shells; no hay procesos en segundo plano que sobrevivan.
+- **Duplicar terminal.** `duplicate_terminal` abre la shell nueva en el directorio de trabajo del programa en primer plano del origen (o, si no hay ninguno, en el de su shell). Si hay un programa en primer plano, por ejemplo un agente, escribe su `argv` en la shell nueva, con cada argumento entre comillas simples, y pulsa Enter. Así el programa corre dentro de una shell y la shell sigue abierta cuando termina. Si algún argumento tiene caracteres de control, solo se abre la shell, porque el editor de línea los tomaría como teclas. Directorio y programa se leen de `/proc` en **Linux** y de la tabla de procesos en **Windows**, donde la línea se escribe para PowerShell (`& 'programa' 'arg'…`) o `cmd.exe`; un argumento que PowerShell 5.1 pasaría mal (vacío o con `"`) hace que solo se abra la shell. En macOS la copia es una shell en el directorio personal. No se copian los links ni el historial. Al reiniciar la app, la copia arranca en el directorio personal, como cualquier terminal.
+- **Reabrir donde estabas.** Cada 15 s y al cerrar, Godesk guarda por terminal su carpeta, su salida y lo que corre (`<datos de la app>/sessions/<id>.json` y `.log`, `src-tauri/src/session.rs`). Al arrancar, cada terminal vuelve en esa carpeta, con su salida anterior y una línea que marca el reinicio, y su programa (`src-tauri/src/resume.rs`): **Claude Code** con `--resume <id>` de su propia conversación (el `.jsonl` de `~/.claude/projects/<carpeta>` que cambió desde que arrancó; dos agentes en la misma carpeta se reparten conversaciones distintas), **Codex** con `codex resume <id>` (el `rollout-*.jsonl` de `~/.codex/sessions` de esa carpeta), **OpenCode** con `--continue`, y otros CLIs de agentes (gemini, aider, qwen…) tal cual. Cualquier otro programa queda escrito en la línea de comandos **sin Enter**: un build o un deploy no se repite solo.
+- **Terminales de agente.** Escribir `claude`, `codex` u `opencode` (solo el nombre) en una terminal abre una ventana propia para ese agente, al lado y en la misma carpeta. El agente corre en su modo JSON y Godesk dibuja la conversación en lugar de su pantalla, igual para los tres: su razonamiento en vivo (abierto mientras piensa, plegado al terminar), el texto que escribe en streaming con markdown y bloques de código copiables, cada herramienta como tarjeta (comandos con su salida como una pequeña terminal, ediciones como diff `+`/`−`, archivos nuevos como código, el plan con lo hecho), y al final de cada turno su duración, tokens y coste. **Esc** o **Stop** detiene el turno sin perder la conversación; **↑** recupera el último mensaje. Claude Code mantiene un proceso (`--input-format stream-json`) y se reinicia con `--resume`; Codex (`exec --json`, sandbox `workspace-write`) y OpenCode (`run --format json`) arrancan un proceso por turno que continúa su sesión, con el mensaje por la entrada estándar (`src-tauri/src/agent_terminal.rs`, `agent_session.rs`, `frontend/src/agent/protocol.ts`).
+- **Subagentes y tokens.** Cada 2 s Godesk lee los archivos de sesión de los agentes de las terminales (`src-tauri/src/agent_watch.rs`, solo lo que se agregó desde la última vez). Los subagentes de Claude Code (`<sesión>/subagents/agent-<id>.jsonl` y `.meta.json`) aparecen como tarjetas de solo lectura junto a su agente, unidas a él con un link que se ilumina mientras trabajan: no son terminales porque corren dentro del proceso de Claude. Muestran su tipo, su tarea, sus tokens y lo que dicen y las herramientas que llaman. Un subagente terminado se ve 10 minutos; **×** lo oculta. El dock muestra los tokens de todos los agentes juntos (Claude Code: entrada + caché + salida de cada mensaje, contado una vez; Codex: el total que registra), con el desglose por terminal. Codex no lanza subagentes.
+- **Cerrar.** La **×**, Alt+F4 y *Quit* preguntan antes si alguna terminal corre un programa, porque cerrar lo detiene (`frontend/src/components/closeGuard.ts`). Al cerrar se guardan las terminales y se devuelven al escritorio las ventanas de otros programas; al cerrar la app se cierran todas las shells.
+
+### Programas en el lienzo (Windows)
+
+El botón de ventana del dock abre en el lienzo **VS Code** (en una carpeta), el **Explorador de archivos**, un **documento** con su programa, o trae una **ventana ya abierta**. El botón `</>` de cada terminal abre VS Code en la carpeta de esa terminal, a su lado.
+
+- **Desde una terminal.** Lo que se lanza en una terminal de Godesk también aparece en el lienzo, junto a ella: `code .`, `explorer .`, `notepad`, o cualquier ventana de un proceso que cuelgue de su shell. El backend revisa los procesos de cada shell cada 200 ms. VS Code y el Explorador entregan la ventana a un proceso que ya corría, así que se reconocen por haberse lanzado: se toma su ventana nueva, o, si VS Code ya tenía esa carpeta abierta, la ventana que la muestra. Se desactiva en ⋯ → *Open programs from terminals here*.
+- **Ventanas que se reemplazan.** Durante 10 s después de lanzarse, si el programa cierra su ventana y abre otra (VS Code reiniciándose para aplicar una actualización, una ventana restaurada que se cierra), la nueva entra en la misma tarjeta. Cerrarlo con la **×** de la tarjeta no espera reemplazo.
+
+- **Cómo se ve.** La ventana del programa no se incrusta como hija: la de Godesk es transparente (DWM blur-behind) y una hija dibujada con GDI se vería traslúcida y por debajo del webview. Queda como ventana de nivel superior, **sin marco y con Godesk como dueño**: se mantiene encima de Godesk, se oculta al minimizarlo y sale de la barra de tareas. `src-tauri/src/embed.rs` la mueve sobre su tarjeta y la recorta (`SetWindowRgn`) a lo visible del lienzo, dejando huecos donde están el dock, los menús, los diálogos y las ventanas que van delante. `frontend/src/canvas/appPlacement.ts` manda esas posiciones una vez por cuadro.
+- **Zoom.** El contenido de otro programa no se puede escalar: se dibujaría a tamaño normal, recortado, mientras todo lo demás se achica. Por debajo del 75 % de zoom, o si la tarjeta queda más chica que 480 × 320 px en pantalla, la ventana se oculta y la tarjeta muestra una foto de cómo se veía en ese momento (leída de la pantalla, solo si Godesk o la ventana están al frente; si no, el programa y su título); un clic en ella vuelve al 100 % centrado en la tarjeta. La foto no es en vivo: se renueva cada vez que la ventana se vuelve a ocultar. (Se probó mostrar una vista previa escalada: `PrintWindow` devuelve VS Code en blanco, y una ventana fuera de pantalla deja de dibujarse.)
+- **Al cerrar Godesk** cada ventana vuelve al escritorio tal como estaba (estilo, dueño y posición). Las tarjetas no se guardan en `state.json`. **↗** en la barra de la tarjeta devuelve una sola; **×** le pide al programa que cierre, y este puede preguntar si guardar.
+- **Límites.** Un programa que corre como administrador no se puede traer si Godesk no lo es. Las apps UWP/WinUI (el Bloc de notas de Windows 11, Configuración) se dibujan en otro proceso y pueden no comportarse bien. Si un programa ya tenía esa carpeta abierta (VS Code reutiliza la ventana), no aparece una ventana nueva: tráela desde "Windows already open".
 
 ## Tests y verificación
 
