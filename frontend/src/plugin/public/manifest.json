@@ -1,0 +1,17 @@
+{
+  "id": "godesk",
+  "name": "Godesk",
+  "publisher": "Godesk",
+  "description": "An infinite board of your agents: every Goia session as a window you can place, with lines showing which agents are talking.",
+  "contributes": {
+    "surfaces": [
+      {
+        "id": "board",
+        "title": "Pizarra",
+        "mount": "agents",
+        "entry": "index.html",
+        "icon": "application"
+      }
+    ]
+  }
+}

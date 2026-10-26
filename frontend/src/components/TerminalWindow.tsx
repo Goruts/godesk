@@ -2,19 +2,21 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { Rect } from "../bindings/Rect";
 import type { TerminalWindow as TerminalModel } from "../bindings/TerminalWindow";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { LOW_ZOOM, dragOffset } from "../canvas/camera";
-import { RESIZE_DIRECTIONS, type ResizeDirection, containsPoint, resizeRect } from "../canvas/geometry";
+import { RESIZE_DIRECTIONS, type ResizeDirection, resizeRect } from "../canvas/geometry";
 import { layout } from "../canvas/layout";
+import { nodeAt } from "../canvas/nodes";
 import { isTypingTarget, trackDrag } from "../canvas/interaction";
 import { viewport } from "../canvas/viewport";
 import { linkDraft } from "../canvas/linkDraft";
-import { activeWorkspace, useAppStore } from "../store/appStore";
+import { useAppStore } from "../store/appStore";
 import { confirmDialog } from "../store/dialogStore";
-import { MOD_KEY } from "../lib/platform";
-import { DuplicateIcon } from "./icons";
+import { MOD_KEY, PLATFORM } from "../lib/platform";
+import { CodeIcon, DuplicateIcon, MaximizeIcon, MinimizeIcon, RestoreIcon } from "./icons";
 import { openDuplicate } from "./shortcuts";
-import { TerminalView, terminals } from "./TerminalView";
+import { AgentTerminal } from "./AgentTerminal";
+import { TerminalView, focusTerminalView } from "./TerminalView";
 
 const CURSORS: Record<ResizeDirection, string> = {
   n: "ns-resize",
@@ -38,37 +40,40 @@ function applyRect(el: HTMLElement, rect: Rect): void {
   el.style.height = `${rect.height}px`;
 }
 
-/** Topmost terminal of the active workspace under a canvas point. */
-function terminalAt(point: { x: number; y: number }, exceptId: string): string | null {
-  const ws = activeWorkspace(useAppStore.getState());
-  if (!ws) return null;
-  const hits = ws.terminals
-    .filter((t) => t.id !== exceptId)
-    .filter((t) => containsPoint(layout.get(t.id) ?? rectOf(t), point))
-    .sort((a, b) => b.z - a.z);
-  return hits[0]?.id ?? null;
-}
+/** Height a collapsed (minimized) window shows: just its title bar (--titlebar-h). */
+const COLLAPSED_HEIGHT = 26;
+/** Fraction of the visible area left as a margin when a window is maximized. */
+const MAXIMIZE_INSET = 0.03;
 
 type Props = { terminal: TerminalModel };
 
 export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const [maximized, setMaximized] = useState(false);
+  // The rectangle to return to when a maximized window is restored.
+  const restoreRect = useRef<Rect | null>(null);
   const refocusAfterRename = useRef(false);
   const closing = useRef(false);
   const focusTerminal = useAppStore((s) => s.focusTerminal);
   const commitTerminalRect = useAppStore((s) => s.commitTerminalRect);
   const renameTerminal = useAppStore((s) => s.renameTerminal);
   const closeTerminal = useAppStore((s) => s.closeTerminal);
+  const openApp = useAppStore((s) => s.openApp);
+  const notify = useAppStore((s) => s.notify);
   const createLink = useAppStore((s) => s.createLink);
   const toggleTerminalSelection = useAppStore((s) => s.toggleTerminalSelection);
   const { id } = terminal;
   const selected = useAppStore((s) => s.selectedTerminalIds.includes(id));
 
   // Publish the committed rectangle for the link layer and drop it on unmount.
+  // A collapsed window reports only its title bar, so arrows meet its visible
+  // edge rather than the hidden body.
   useLayoutEffect(() => {
-    layout.set(id, rectOf(terminal));
-  }, [id, terminal.x, terminal.y, terminal.width, terminal.height]);
+    const rect = rectOf(terminal);
+    layout.set(id, collapsed ? { ...rect, height: COLLAPSED_HEIGHT } : rect);
+  }, [id, terminal.x, terminal.y, terminal.width, terminal.height, collapsed]);
   useLayoutEffect(() => () => layout.delete(id), [id]);
 
   // Highlight this window while a link being drawn would connect to it.
@@ -79,7 +84,7 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
 
   const focus = () => {
     focusTerminal(id);
-    terminals.get(id)?.focus();
+    focusTerminalView(id);
   };
 
   /** Moves/resizes the DOM node directly while dragging; commits on release. */
@@ -89,6 +94,12 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
     e.preventDefault();
     e.stopPropagation();
     focus();
+    // Taking manual control of the geometry ends the maximized state, so the
+    // control toggles to "maximize" again and no stale restore rect lingers.
+    if (maximized) {
+      setMaximized(false);
+      restoreRect.current = null;
+    }
     const start = rectOf(terminal);
     let current = start;
     // Geometry is in canvas units; re-run on camera changes too, since the
@@ -150,11 +161,51 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
     if (ref.current?.closest('[data-space-pan="true"]')) return;
     const active = document.activeElement;
     if (active && isTypingTarget(active) && !active.closest(".term-body")) return;
-    terminals.get(id)?.focus();
+    focusTerminalView(id);
   };
 
   const onResizePointerDown = (direction: ResizeDirection) => (e: ReactPointerEvent) =>
     startGeometryDrag(e, CURSORS[direction], (start, dx, dy) => resizeRect(start, direction, dx, dy));
+
+  // Minimize: collapse to the title bar, or expand again. Local to the view —
+  // the window keeps its real size, only its body is hidden.
+  const onToggleCollapse = () => {
+    focus();
+    setCollapsed((value) => !value);
+  };
+
+  // Maximize to fill the visible canvas, or restore the previous rectangle.
+  const onToggleMaximize = () => {
+    const el = ref.current;
+    if (!el) return;
+    focus();
+    if (maximized) {
+      const previous = restoreRect.current;
+      restoreRect.current = null;
+      setMaximized(false);
+      if (previous) {
+        applyRect(el, previous);
+        layout.set(id, previous);
+        void commitTerminalRect(id, previous);
+      }
+      return;
+    }
+    const area = viewport.visibleRect();
+    const insetX = area.width * MAXIMIZE_INSET;
+    const insetY = area.height * MAXIMIZE_INSET;
+    const target = {
+      x: area.x + insetX,
+      y: area.y + insetY,
+      width: area.width - insetX * 2,
+      height: area.height - insetY * 2,
+    };
+    restoreRect.current = rectOf(terminal);
+    setMaximized(true);
+    setCollapsed(false);
+    applyRect(el, target);
+    layout.set(id, target);
+    void commitTerminalRect(id, target);
+  };
 
   /** Draws a link from this window; releasing over another one creates it. */
   const onLinkHandlePointerDown = (e: ReactPointerEvent) => {
@@ -168,7 +219,7 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
     const update = () => {
       if (cancelled) return;
       const to = viewport.clientToWorld(clientX, clientY);
-      linkDraft.update(id, to, terminalAt(to, id));
+      linkDraft.update(id, to, nodeAt(to, id));
     };
     const onKeyDown = (ev: KeyboardEvent) => {
       if (ev.key !== "Escape") return;
@@ -194,7 +245,7 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
         window.removeEventListener("keydown", onKeyDown, true);
         linkDraft.clear();
         if (cancelled || ev.type !== "pointerup") return;
-        const target = terminalAt(viewport.clientToWorld(ev.clientX, ev.clientY), id);
+        const target = nodeAt(viewport.clientToWorld(ev.clientX, ev.clientY), id);
         if (target) void createLink(id, target);
       },
     );
@@ -214,13 +265,23 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
           danger: true,
         });
         if (!ok) {
-          terminals.get(id)?.focus();
+          focusTerminalView(id);
           return;
         }
       }
       await closeTerminal(id);
     } finally {
       closing.current = false;
+    }
+  };
+
+  /** VS Code on the folder the terminal works in, beside it on the canvas. */
+  const onOpenInVsCode = async () => {
+    try {
+      const folder = await api.terminalFolder(id);
+      await openApp({ kind: "vsCode", folder }, "VS Code", id);
+    } catch (e) {
+      notify(errorMessage(e));
     }
   };
 
@@ -240,7 +301,7 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
   useEffect(() => {
     if (editing || !refocusAfterRename.current) return;
     refocusAfterRename.current = false;
-    terminals.get(id)?.focus();
+    focusTerminalView(id);
   }, [editing, id]);
 
   return (
@@ -251,6 +312,8 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
       aria-label={terminal.name}
       data-terminal-id={id}
       data-selected={selected || undefined}
+      data-collapsed={collapsed || undefined}
+      data-maximized={maximized || undefined}
       style={{ left: terminal.x, top: terminal.y, width: terminal.width, height: terminal.height, zIndex: terminal.z }}
       onPointerDownCapture={(e) => {
         if (e.button !== 0) return;
@@ -282,7 +345,7 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
           />
         ) : (
           <span className="term-title" title="Double-click to rename">
-            {terminal.name}
+            <span className="term-title-text">{terminal.name}</span>
           </span>
         )}
         <button
@@ -293,6 +356,35 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
           onClick={() => void openDuplicate(id)}
         >
           <DuplicateIcon />
+        </button>
+        {PLATFORM === "windows" && (
+          <button
+            type="button"
+            className="term-action"
+            aria-label={`Open the folder of ${terminal.name} in VS Code`}
+            title="Open this folder in VS Code, beside the terminal"
+            onClick={() => void onOpenInVsCode()}
+          >
+            <CodeIcon />
+          </button>
+        )}
+        <button
+          type="button"
+          className="term-action"
+          aria-label={collapsed ? `Expand ${terminal.name}` : `Minimize ${terminal.name}`}
+          title={collapsed ? "Expand" : "Minimize to the title bar"}
+          onClick={onToggleCollapse}
+        >
+          <MinimizeIcon />
+        </button>
+        <button
+          type="button"
+          className="term-action"
+          aria-label={maximized ? `Restore ${terminal.name}` : `Maximize ${terminal.name}`}
+          title={maximized ? "Restore size" : "Maximize to fill the view"}
+          onClick={onToggleMaximize}
+        >
+          {maximized ? <RestoreIcon /> : <MaximizeIcon />}
         </button>
         <button
           type="button"
@@ -305,7 +397,7 @@ export const TerminalWindow = memo(function TerminalWindow({ terminal }: Props) 
         </button>
       </div>
       <div className="term-body">
-        <TerminalView terminalId={id} />
+        {terminal.agent ? <AgentTerminal terminalId={id} agent={terminal.agent} /> : <TerminalView terminalId={id} />}
       </div>
       {RESIZE_DIRECTIONS.map((direction) => (
         <div

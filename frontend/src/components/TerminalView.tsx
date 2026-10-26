@@ -3,6 +3,7 @@ import { type ITerminalOptions, Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+
 import type { PtyOutputEvent } from "../bindings/PtyOutputEvent";
 import { api, errorMessage, events } from "../lib/api";
 import { decodeBase64, encodeBinaryString, encodeText } from "../lib/base64";
@@ -21,7 +22,7 @@ const THEME = {
   foreground: "#dcdcde",
   cursor: "#ededee",
   cursorAccent: "#141415",
-  selectionBackground: "#3a3a3e",
+  selectionBackground: "rgba(255, 255, 255, 0.16)",
   black: "#26262b",
   red: "#f7768e",
   green: "#9ece6a",
@@ -60,14 +61,29 @@ export function terminalOptions(platform: Platform): ITerminalOptions {
 /** Mounted xterm instances, so windows can move keyboard focus into them. */
 export const terminals = new Map<string, Terminal>();
 
-/** Terminals that asked for focus before their xterm existed. */
+/** Focus functions for the agent views' input, by terminal id, so a terminal
+ * showing an agent takes the keyboard in its composer, not an xterm. */
+export const agentInputs = new Map<string, () => void>();
+
+/** Terminals that asked for focus before their view existed. */
 const pendingFocus = new Set<string>();
 
-/** Focuses a terminal now, or as soon as its view mounts (e.g. a new one). */
+/** Focuses a terminal now, or as soon as its view mounts (e.g. a new one):
+ * its xterm if it shows a shell, its composer if it shows an agent. */
 export function focusTerminalView(terminalId: string): void {
   const term = terminals.get(terminalId);
-  if (term) term.focus();
+  if (term) {
+    term.focus();
+    return;
+  }
+  const focusAgent = agentInputs.get(terminalId);
+  if (focusAgent) focusAgent();
   else pendingFocus.add(terminalId);
+}
+
+/** Whether a focus was requested for `terminalId` before its view mounted. */
+export function takePendingFocus(terminalId: string): boolean {
+  return pendingFocus.delete(terminalId);
 }
 
 const MOUSE_EVENTS = ["mousedown", "mousemove", "mouseup", "click", "dblclick", "contextmenu", "auxclick"] as const;
@@ -166,6 +182,7 @@ type SessionState = { status: "running" } | { status: "exited"; code: number | n
 
 export function TerminalView({ terminalId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+
   const [generation, setGeneration] = useState(0);
   const [session, setSession] = useState<SessionState>({ status: "running" });
   const sizeRef = useRef({ cols: 80, rows: 24 });
@@ -195,10 +212,21 @@ export function TerminalView({ terminalId }: Props) {
     };
     safeFit();
 
-    // Input → PTY.
-    const dataSub = term.onData((data) => void api.writeTerminal(terminalId, encodeText(data)).catch(() => undefined));
+    // While the saved history is being replayed, xterm must not answer the
+    // terminal queries inside it (device attributes, cursor position, colour
+    // palette). Those answers would be typed into the live shell and show up
+    // as garbage at its prompt — most visibly when a terminal returns to its
+    // shell after an agent's `/exit`. Replaying is brief; real input is never
+    // being typed during it.
+    let replaying = false;
+
+    // Input → PTY. An agent the shell starts is taken over by the backend:
+    // the terminal then shows Godesk's view of it (see AgentTerminal).
+    const dataSub = term.onData(
+      (data) => void (replaying || api.writeTerminal(terminalId, encodeText(data)).catch(() => undefined)),
+    );
     const binarySub = term.onBinary(
-      (data) => void api.writeTerminal(terminalId, encodeBinaryString(data)).catch(() => undefined),
+      (data) => void (replaying || api.writeTerminal(terminalId, encodeBinaryString(data)).catch(() => undefined)),
     );
     cleanups.push(() => dataSub.dispose(), () => binarySub.dispose());
 
@@ -224,11 +252,17 @@ export function TerminalView({ terminalId }: Props) {
 
     // Output: listen first, then attach. Events that arrive before the replay
     // are queued; anything the replay already contains (seq ≤ snapshot) is
-    // dropped, so nothing is lost or written twice.
+    // dropped, so nothing is lost or written twice. The backend coalesces a
+    // burst of reads into one event, so an event can straddle the replay
+    // boundary: `seq` is the byte count at its end, so its first byte sits at
+    // `seq - length`, and only the bytes past the snapshot are written.
     let replayedUpTo: number | null = null;
     const queued: PtyOutputEvent[] = [];
     const write = (e: PtyOutputEvent) => {
-      if (replayedUpTo !== null && e.seq > replayedUpTo) term.write(decodeBase64(e.data));
+      if (replayedUpTo === null || e.seq <= replayedUpTo) return;
+      const bytes = decodeBase64(e.data);
+      const start = e.seq - bytes.length;
+      term.write(start >= replayedUpTo ? bytes : bytes.subarray(replayedUpTo - start));
     };
 
     // Events and command replies travel separately: an exit seen while the
@@ -255,7 +289,16 @@ export function TerminalView({ terminalId }: Props) {
         sizeRef.current = { cols, rows };
         const result = await api.attachTerminal(terminalId, cols, rows);
         if (disposed) return;
-        term.write(decodeBase64(result.data));
+        const replay = decodeBase64(result.data);
+        if (replay.length > 0) {
+          replaying = true;
+          // The callback fires once this write is parsed — after any query
+          // answers it provoked have been dropped, and before the live events
+          // below, whose answers the shell does need.
+          term.write(replay, () => {
+            replaying = false;
+          });
+        }
         replayedUpTo = result.seq;
         queued.splice(0).forEach(write);
         if (!exited) setSession(result.alive ? { status: "running" } : { status: "exited", code: null });

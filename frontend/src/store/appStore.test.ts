@@ -6,7 +6,7 @@ import type { TerminalWindow } from "../bindings/TerminalWindow";
 import type { Workspace } from "../bindings/Workspace";
 import { viewport } from "../canvas/viewport";
 import { api } from "../lib/api";
-import { useAppStore } from "./appStore";
+import { type CanvasApp, useAppStore } from "./appStore";
 
 // Like Tauri 2, commands that return `()` in Rust resolve to null.
 vi.mock("../lib/api", async (importOriginal) => ({
@@ -18,6 +18,12 @@ vi.mock("../lib/api", async (importOriginal) => ({
     duplicateTerminal: vi.fn(async (_id: string, rect: Rect) => ({ id: "copy", name: "t1 2", ...rect, z: 2 })),
     closeTerminal: vi.fn(async () => null),
     updateTerminalRect: vi.fn(),
+    focusTerminal: vi.fn(async () => 9),
+    openApp: vi.fn(async () => ({ id: "a1", title: "Welcome - Visual Studio Code", program: "Code.exe" })),
+    focusApp: vi.fn(async () => null),
+    releaseApp: vi.fn(async () => null),
+    setAgentView: vi.fn(async () => null),
+    agentToClassic: vi.fn(async (id: string) => ({ id, name: id, x: 0, y: 0, width: 600, height: 400, z: 1, agent: null })),
   },
 }));
 
@@ -26,7 +32,7 @@ function terminal(id: string): TerminalWindow {
 }
 
 function workspace(id: string, name: string, terminals: TerminalWindow[] = [], links: Link[] = []): Workspace {
-  return { id, name, camera: { x: 0, y: 0, zoom: 1 }, terminals, links };
+  return { id, name, camera: { x: 0, y: 0, zoom: 1 }, terminals, links, knowledgeBases: [] };
 }
 
 const LINK: Link = { id: "l1", sourceId: "t1", targetId: "t2", kind: "manual", lastActivityAt: 0 };
@@ -41,12 +47,36 @@ beforeEach(() => {
     activeWorkspaceId: "w1",
     selectedLinkId: null,
     selectedTerminalIds: [],
+    apps: [],
     workspaces: [workspace("w1", "Main", [terminal("t1"), terminal("t2")], [LINK]), workspace("w2", "Agents")],
   });
 });
 
+function app(id: string, workspaceId: string, z: number): CanvasApp {
+  return { id, title: id, program: "Code.exe", workspaceId, x: 0, y: 0, width: 800, height: 600, z };
+}
+
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+describe("where agents open", () => {
+  it("keeps the user's choice and tells the backend once", () => {
+    useAppStore.setState({ agentView: true });
+    state().setAgentView(false);
+    state().setAgentView(false);
+    expect(state().agentView).toBe(false);
+    expect(api.setAgentView).toHaveBeenCalledTimes(1);
+    expect(api.setAgentView).toHaveBeenCalledWith(false);
+    expect(localStorage.getItem("godesk.agentView")).toBe("false");
+  });
+
+  it("opens one terminal's agent on its own screen", async () => {
+    useAppStore.setState({ workspaces: [workspace("w1", "Main", [{ ...terminal("t1"), agent: "claude" }])] });
+    await state().agentToClassic("t1");
+    expect(api.agentToClassic).toHaveBeenCalledWith("t1");
+    expect(main().terminals[0]?.agent).toBeNull();
+  });
 });
 
 describe("closeTerminal", () => {
@@ -217,5 +247,55 @@ describe("duplicateTerminal", () => {
     await expect(state().duplicateTerminal("t1")).resolves.toBeNull();
     expect(main().terminals.map((t) => t.id)).toEqual(["t1", "t2"]);
     expect(state().toast).toBe("terminal t1 not found");
+  });
+});
+
+describe("apps on the canvas", () => {
+  beforeEach(() => {
+    viewport.setBounds({ left: 0, top: 0, width: 3000, height: 2000 });
+    viewport.load("w1", { x: 0, y: 0, zoom: 1 });
+  });
+
+  it("opens a program beside its terminal, in front of every window", async () => {
+    const opened = await state().openApp({ kind: "vsCode", folder: "C:\\work" }, "VS Code", "t1");
+
+    expect(api.openApp).toHaveBeenCalledWith({ kind: "vsCode", folder: "C:\\work" });
+    expect(opened).toMatchObject({ id: "a1", workspaceId: "w1", x: 624, y: 0, width: 1000, height: 680, z: 2 });
+    expect(state().apps).toEqual([opened]);
+    expect(api.focusApp).toHaveBeenCalledWith("a1");
+    expect(state().toast).toBeNull();
+  });
+
+  it("adds nothing and explains why when the program shows no window", async () => {
+    vi.mocked(api.openApp).mockRejectedValueOnce("No new window appeared.");
+    expect(await state().openApp({ kind: "explorer", folder: null }, "File Explorer")).toBeNull();
+
+    expect(state().apps).toEqual([]);
+    expect(state().toast).toBe("No new window appeared.");
+  });
+
+  it("stacks terminals and programs in one order", () => {
+    useAppStore.setState({ apps: [app("a1", "w1", 5)] });
+    state().focusTerminal("t1");
+    expect(main().terminals.find((t) => t.id === "t1")!.z).toBe(6);
+
+    state().focusApp("a1");
+    expect(state().apps[0]!.z).toBe(7);
+    expect(api.focusApp).toHaveBeenCalledWith("a1");
+  });
+
+  it("keeps a card at least the minimum size", () => {
+    useAppStore.setState({ apps: [app("a1", "w1", 1)] });
+    state().moveApp("a1", { x: 10, y: 20, width: 50, height: 50 });
+    expect(state().apps[0]).toMatchObject({ x: 10, y: 20, width: 320, height: 200 });
+  });
+
+  it("gives a deleted workspace's windows back to the desktop", async () => {
+    useAppStore.setState({ apps: [app("a1", "w1", 1), app("a2", "w2", 1)] });
+    await state().deleteWorkspace("w1");
+
+    expect(api.releaseApp).toHaveBeenCalledWith("a1");
+    expect(api.releaseApp).not.toHaveBeenCalledWith("a2");
+    expect(state().apps.map((a) => a.id)).toEqual(["a2"]);
   });
 });

@@ -9,8 +9,12 @@ import { viewport } from "../canvas/viewport";
 import { events } from "../lib/api";
 import { MOD_KEY } from "../lib/platform";
 import { activeWorkspace, useAppStore } from "../store/appStore";
+import { isSubagentLink, subagentCards, subagentLinks } from "../canvas/subagents";
+import { AppWindow } from "./AppWindow";
 import { LinkLayer } from "./LinkLayer";
+import { SubagentWindow } from "./SubagentWindow";
 import { TerminalWindow } from "./TerminalWindow";
+import { KnowledgeBaseNode } from "./KnowledgeBaseNode";
 
 const CAMERA_SAVE_DEBOUNCE_MS = 300;
 const EMPTY: never[] = [];
@@ -32,6 +36,10 @@ export function Canvas() {
   const spaceHeld = useRef(false);
 
   const workspaces = useAppStore((s) => s.workspaces);
+  const apps = useAppStore((s) => s.apps);
+  const agents = useAppStore((s) => s.agents);
+  const dismissedSubagents = useAppStore((s) => s.dismissedSubagents);
+  const movedSubagents = useAppStore((s) => s.movedSubagents);
   const ws = useAppStore(activeWorkspace);
   const terminals = ws?.terminals ?? EMPTY;
   const links = ws?.links ?? EMPTY;
@@ -41,6 +49,9 @@ export function Canvas() {
   const selectLink = useAppStore((s) => s.selectLink);
   const selectTerminals = useAppStore((s) => s.selectTerminals);
   const saveCamera = useAppStore((s) => s.saveCamera);
+
+  // Subagents of the agents in this workspace, beside their agent.
+  const subagents = subagentCards(agents, terminals, dismissedSubagents, movedSubagents, Date.now());
 
   // Camera → DOM, with no React render.
   useLayoutEffect(() => {
@@ -271,11 +282,17 @@ export function Canvas() {
     >
       <div ref={worldRef} className="world" data-links-hidden={linksVisible ? undefined : ""}>
         <LinkLayer
-          links={links}
-          terminals={terminals}
+          links={[...links, ...subagentLinks(subagents)]}
+          terminals={[
+            ...terminals,
+            ...subagents.map((s) => ({ id: `sub:${s.id}`, name: `${s.kind}: ${s.description}`, ...s.rect, z: 0 })),
+          ]}
           visible={linksVisible}
           selectedId={selectedLinkId}
-          onSelect={selectLink}
+          // A subagent's link is not the person's to delete.
+          onSelect={(id) => {
+            if (!isSubagentLink(id)) selectLink(id);
+          }}
         />
         {/* Every workspace stays mounted and only the active one shows:
             rebuilding xterm (renderer, scrollback replay) on each switch
@@ -285,10 +302,20 @@ export function Canvas() {
             {w.terminals.map((t) => (
               <TerminalWindow key={t.id} terminal={t} />
             ))}
+            {(w.knowledgeBases ?? []).map((k) => (
+              <KnowledgeBaseNode key={k.id} knowledgeBase={k} />
+            ))}
+            {apps
+              .filter((a) => a.workspaceId === w.id)
+              .map((a) => (
+                <AppWindow key={a.id} app={a} />
+              ))}
+            {w.id === workspaceId &&
+              subagents.map((card) => <SubagentWindow key={card.id} card={card} />)}
           </div>
         ))}
       </div>
-      {ws && terminals.length === 0 && (
+      {ws && terminals.length === 0 && !apps.some((a) => a.workspaceId === ws.id) && (
         <div className="canvas-empty">
           <p>This workspace is empty.</p>
           <p>
