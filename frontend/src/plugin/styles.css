@@ -1,0 +1,208 @@
+/* Godesk canvas, as a Goia surface. A dark, self-contained palette (the frame is
+   isolated, so it cannot read Goia's theme tokens); colours echo Goia's Carbon
+   dark so it does not jar beside the rest of the app. */
+:root {
+  --bg: #161616;
+  --surface: #262626;
+  --surface-2: #393939;
+  --border: #393939;
+  --text: #f4f4f4;
+  --muted: #a8a8a8;
+  --manual: #78a9ff;
+  --detected: #f1c21b;
+  --selected: #ffffff;
+  --float-glass: rgb(38 38 38 / 0.85);
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 "IBM Plex Sans", system-ui, sans-serif;
+  overflow: hidden;
+}
+
+.app { position: relative; height: 100%; width: 100%; }
+
+.hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+/* ---------- canvas ---------- */
+
+.canvas-root {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 1px 1px, #2a2a2a 1px, transparent 0) 0 0 / 28px 28px;
+  touch-action: none;
+  cursor: grab;
+}
+
+.canvas-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  --inv-zoom: 1;
+}
+
+/* ---------- a node (one agent) ---------- */
+
+.node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+}
+
+.node.is-focused {
+  border-color: var(--manual);
+  box-shadow: 0 0 0 1px var(--manual), 0 10px 28px rgb(0 0 0 / 0.5);
+}
+
+.node-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  background: var(--surface-2);
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.node-name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node-provider { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.node-handle { color: var(--manual); cursor: crosshair; padding: 0 2px; }
+
+.node-body { position: relative; flex: 1; min-height: 0; overflow: hidden; background: var(--bg); }
+
+.node-empty {
+  padding: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.node-mirror {
+  margin: 0;
+  padding: 8px 10px;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.25;
+  white-space: pre;
+}
+
+.node-live { position: absolute; inset: 0; }
+.node-live .xterm { height: 100%; padding: 6px; }
+
+/* ---------- links (ported from godesk's styles.css) ---------- */
+
+.link-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.link-layer.links-hidden .link { display: none; }
+
+.link-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: calc(14px * var(--inv-zoom));
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.link-line {
+  fill: none;
+  stroke-width: calc(2px * var(--inv-zoom));
+  stroke-linecap: round;
+  pointer-events: none;
+  transition: opacity 400ms, stroke 200ms;
+}
+
+.link-glow {
+  fill: none;
+  stroke-width: calc(10px * var(--inv-zoom));
+  stroke-linecap: round;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 400ms;
+}
+
+.link-manual .link-line, .link-manual .link-glow { stroke: var(--manual); }
+.link-detected .link-line, .link-detected .link-glow { stroke: var(--detected); }
+.link-detected .link-line { stroke-dasharray: calc(6px * var(--inv-zoom)) calc(5px * var(--inv-zoom)); }
+
+.link[data-activity="idle"] .link-line { opacity: 0.45; }
+.link-detected[data-activity="idle"] .link-line { opacity: 0.3; }
+
+.link[data-activity="active"] .link-line {
+  opacity: 1;
+  stroke-width: calc(3px * var(--inv-zoom));
+  stroke-dasharray: calc(10px * var(--inv-zoom)) calc(8px * var(--inv-zoom));
+  animation: link-flow 0.8s linear infinite;
+}
+.link[data-activity="active"] .link-glow { opacity: 0.22; }
+
+.link.is-selected .link-line { stroke: var(--selected); stroke-width: calc(3px * var(--inv-zoom)); opacity: 1; }
+.link:hover .link-line { opacity: 1; }
+
+@keyframes link-flow { to { stroke-dashoffset: calc(-18px * var(--inv-zoom)); } }
+
+.link-arrow-manual path { fill: var(--manual); }
+.link-arrow-detected path { fill: var(--detected); }
+.link-arrow-selected path { fill: var(--selected); }
+
+.link-draft {
+  fill: none;
+  stroke: var(--manual);
+  stroke-width: calc(2px * var(--inv-zoom));
+  stroke-dasharray: calc(4px * var(--inv-zoom)) calc(4px * var(--inv-zoom));
+}
+
+.link-tooltip {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  background: var(--float-glass);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.4);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.link-tooltip-arrow { color: var(--muted); }
+.link-tooltip-kind { margin-left: 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.link-tooltip-hint { margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--border); color: var(--muted); font-size: 11px; }

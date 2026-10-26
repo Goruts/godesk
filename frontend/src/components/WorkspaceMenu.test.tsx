@@ -28,7 +28,7 @@ function terminal(id: string): TerminalWindow {
 }
 
 function workspace(id: string, name: string, terminals: TerminalWindow[] = []): Workspace {
-  return { id, name, camera: { x: 0, y: 0, zoom: 1 }, terminals, links: [] };
+  return { id, name, camera: { x: 0, y: 0, zoom: 1 }, terminals, links: [], knowledgeBases: [] };
 }
 
 let container: HTMLDivElement;

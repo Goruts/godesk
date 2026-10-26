@@ -13,11 +13,17 @@ import { focusTerminalView, terminals } from "./TerminalView";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock("./TerminalView", () => ({
-  TerminalView: () => null,
-  terminals: new Map(),
-  focusTerminalView: vi.fn(),
-}));
+vi.mock("./TerminalView", () => {
+  const terminals = new Map<string, { focus: () => void }>();
+  return {
+    TerminalView: () => null,
+    terminals,
+    agentInputs: new Map<string, () => void>(),
+    takePendingFocus: () => false,
+    // Like the real one: a shell's xterm takes the keyboard.
+    focusTerminalView: vi.fn((id: string) => terminals.get(id)?.focus()),
+  };
+});
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
   api: {
@@ -55,7 +61,9 @@ beforeEach(() => {
     toast: null,
     selectedTerminalIds: [],
     activeWorkspaceId: "w1",
-    workspaces: [{ id: "w1", name: "Main", camera: { x: 0, y: 0, zoom: 1 }, terminals: [TERMINAL], links: [] }],
+    workspaces: [
+      { id: "w1", name: "Main", camera: { x: 0, y: 0, zoom: 1 }, terminals: [TERMINAL], links: [], knowledgeBases: [] },
+    ],
   });
   shellInput = document.createElement("textarea");
   document.body.append(shellInput);

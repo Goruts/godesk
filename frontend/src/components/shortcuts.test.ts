@@ -27,7 +27,7 @@ const existing = (x: number, y: number): TerminalWindow => ({ id: "old", name: "
 function setTerminals(terminals: TerminalWindow[]) {
   useAppStore.setState({
     activeWorkspaceId: "w1",
-    workspaces: [{ id: "w1", name: "Main", camera: { x: 100, y: 50, zoom: 2 }, terminals, links: [] }],
+    workspaces: [{ id: "w1", name: "Main", camera: { x: 100, y: 50, zoom: 2 }, terminals, links: [], knowledgeBases: [] }],
   });
 }
 

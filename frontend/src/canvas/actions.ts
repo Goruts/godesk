@@ -13,6 +13,12 @@ export function resetZoom(): void {
   viewport.set(zoomAt(viewport.get(), { x: width / 2, y: height / 2 }, 1));
 }
 
+/** Shows `rect` at 100 %, centered. */
+export function focusRect(rect: Rect): void {
+  const { width, height } = viewport.getBounds();
+  viewport.set({ x: width / 2 - (rect.x + rect.width / 2), y: height / 2 - (rect.y + rect.height / 2), zoom: 1 });
+}
+
 /** Frames every given rectangle; does nothing for an empty workspace. */
 export function fitToContent(rects: Rect[]): void {
   const bounds = boundsOf(rects);

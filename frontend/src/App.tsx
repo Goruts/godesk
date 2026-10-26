@@ -1,9 +1,14 @@
 import { useEffect } from "react";
+import { installAppPlacement } from "./canvas/appPlacement";
+import { PLATFORM } from "./lib/platform";
 import { useAppStore } from "./store/appStore";
 import { Canvas } from "./components/Canvas";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { Dock } from "./components/Dock";
+import { FolderPalette } from "./components/FolderPalette";
+import { installCloseGuard } from "./components/closeGuard";
 import { installShortcuts } from "./components/shortcuts";
+import { Titlebar } from "./components/Titlebar";
 
 const TOAST_MS = 4_000;
 
@@ -32,13 +37,18 @@ export function App() {
     void init();
   }, [init]);
   useEffect(installShortcuts, []);
+  useEffect(installCloseGuard, []);
+  // Other programs' windows only exist on Windows.
+  useEffect(() => (PLATFORM === "windows" ? installAppPlacement() : undefined), []);
 
   return (
     <div className="app" data-canvas={transparentCanvas ? "transparent" : "solid"}>
+      <Titlebar />
       <main className="main">
         {ready ? <Canvas /> : <div className="loading">Loading workspaces…</div>}
         <Dock />
       </main>
+      <FolderPalette />
       <ConfirmDialog />
       <Toast />
     </div>
