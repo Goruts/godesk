@@ -83,6 +83,14 @@ export function installShortcuts(): () => void {
       if (!e.repeat) void openDuplicate(id);
       return;
     }
+    // Ctrl/Cmd+P: the folder palette (zoxide-style jump). Works from inside a
+    // terminal too, so it is handled before the text-field guard below.
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "p") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) useAppStore.getState().setFolderPalette(true);
+      return;
+    }
     if (isTypingTarget(e.target) || useDialogStore.getState().pending) return;
     const { selectedLinkId, selectedTerminalIds, deleteLink, selectLink, selectTerminals } = useAppStore.getState();
     if (e.key === "Delete" || e.key === "Backspace") {

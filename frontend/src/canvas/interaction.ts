@@ -29,25 +29,43 @@ export function trackDrag(
   const pointerId = event.pointerId;
   const startX = event.clientX;
   const startY = event.clientY;
-  element.setPointerCapture(pointerId);
+  // Pointer capture keeps the cursor and xterm behaving, but the drag must not
+  // depend on it: if capture is lost or the handle's node is replaced by a
+  // re-render, a listener bound to `element` would never see the release and the
+  // interaction shield would stay up, freezing the whole canvas. So the move and
+  // end listeners live on `window`, filtered by pointerId, and run exactly once.
+  try {
+    element.setPointerCapture(pointerId);
+  } catch {
+    // Capture is best-effort; the window listeners below still end the drag.
+  }
   const end = beginInteraction(cursor);
 
+  let ended = false;
   const move = (e: PointerEvent) => {
     if (e.pointerId !== pointerId) return;
     onMove(e.clientX - startX, e.clientY - startY, e);
   };
   const up = (e: PointerEvent) => {
-    if (e.pointerId !== pointerId) return;
-    element.removeEventListener("pointermove", move);
-    element.removeEventListener("pointerup", up);
-    element.removeEventListener("pointercancel", up);
+    if (e.pointerId !== pointerId || ended) return;
+    ended = true;
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", up);
+    element.removeEventListener("lostpointercapture", up);
+    window.removeEventListener("blur", onBlur);
     if (element.hasPointerCapture(pointerId)) element.releasePointerCapture(pointerId);
     end();
     onEnd(e);
   };
-  element.addEventListener("pointermove", move);
-  element.addEventListener("pointerup", up);
-  element.addEventListener("pointercancel", up);
+  // Window losing focus (alt-tab, OS dialog) drops the pointer stream; end the
+  // drag so the shield never gets stuck.
+  const onBlur = () => up(new PointerEvent("pointercancel", { pointerId }));
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+  element.addEventListener("lostpointercapture", up);
+  window.addEventListener("blur", onBlur);
 }
 
 /** True when keyboard focus is in a text field or a terminal. */
