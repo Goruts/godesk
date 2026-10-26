@@ -8,4 +8,10 @@ export type TerminalWindow = { id: string, name: string, x: number, y: number, w
 /**
  * Stacking order inside the workspace; higher is in front.
  */
-z: number, };
+z: number, 
+/**
+ * The coding agent this terminal belongs to ("claude"), if any. An agent
+ * terminal runs the agent itself, not a shell, and the frontend draws
+ * what the agent says instead of a terminal screen.
+ */
+agent?: string | null, };

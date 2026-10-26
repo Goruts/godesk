@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn save_then_load_round_trips_without_detected_links() {
+    fn save_then_load_round_trips_manual_links() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join(STATE_FILE);
         let mut model = Model::default();
@@ -147,7 +147,6 @@ mod tests {
         let a = model.add_terminal(&ws, rect).unwrap().id;
         let b = model.add_terminal(&ws, rect).unwrap().id;
         model.add_manual_link(&a, &b, 1).unwrap();
-        model.touch_link(&ws, &b, &a, 1);
 
         save(&path, &model.persisted()).unwrap();
         let loaded = load(&path);

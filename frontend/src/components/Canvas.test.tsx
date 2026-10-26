@@ -77,8 +77,8 @@ beforeEach(() => {
     ready: true,
     activeWorkspaceId: "w1",
     workspaces: [
-      { id: "w1", name: "Main", camera: CAMERA_1, terminals: [terminal("t1")], links: [] },
-      { id: "w2", name: "Side", camera: CAMERA_2, terminals: [terminal("t2")], links: [] },
+      { id: "w1", name: "Main", camera: CAMERA_1, terminals: [terminal("t1")], links: [], knowledgeBases: [] },
+      { id: "w2", name: "Side", camera: CAMERA_2, terminals: [terminal("t2")], links: [], knowledgeBases: [] },
     ],
   });
   container = document.createElement("div");
@@ -157,8 +157,9 @@ describe("Canvas selection box", () => {
           camera: { x: 0, y: 0, zoom: 1 },
           terminals: [terminal("t1"), { ...terminal("t3"), x: 1000, y: 0 }],
           links: [],
+          knowledgeBases: [],
         },
-        { id: "w2", name: "Side", camera: CAMERA_2, terminals: [terminal("t2")], links: [] },
+        { id: "w2", name: "Side", camera: CAMERA_2, terminals: [terminal("t2")], links: [], knowledgeBases: [] },
       ],
     });
     act(() => viewport.load("w1", { x: 0, y: 0, zoom: 1 }));

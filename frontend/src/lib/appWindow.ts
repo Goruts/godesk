@@ -9,6 +9,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 export const appWindow = {
   minimize: () => getCurrentWindow().minimize(),
   toggleMaximize: () => getCurrentWindow().toggleMaximize(),
-  /** Same path as the native close button: the backend flushes state on exit. */
+  /** Same path as the native close button: it asks first when programs run (components/closeGuard.ts). */
   close: () => getCurrentWindow().close(),
 };

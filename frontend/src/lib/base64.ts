@@ -21,9 +21,15 @@ export function decodeBase64(data: string): Uint8Array {
 }
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 export function encodeText(text: string): string {
   return encodeBase64(encoder.encode(text));
+}
+
+/** The bytes of `data` as text. */
+export function decodeText(data: string): string {
+  return decoder.decode(decodeBase64(data));
 }
 
 /** xterm's `onBinary` delivers one byte per UTF-16 code unit. */

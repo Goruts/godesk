@@ -43,6 +43,7 @@ const WORKSPACE: Workspace = {
   camera: { x: 0, y: 0, zoom: 1 },
   terminals: [terminal("t1"), terminal("t2")],
   links: [LINK],
+  knowledgeBases: [],
 };
 
 let container: HTMLDivElement;
