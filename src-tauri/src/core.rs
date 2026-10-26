@@ -1,21 +1,46 @@
-//! Glue between the model, the PTY sessions, link detection and the
-//! frontend. Lock order is always `model` before `detector`.
+//! Glue between the model, the PTY sessions and the frontend.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
 
-use crate::links::{LinkDetector, Peer};
-use crate::model::{Link, LinksChangedEvent, PtyExitEvent, PtyOutputEvent};
+use crate::model::{KnowledgeBase, KnowledgeBasesChangedEvent, Link, LinksChangedEvent, PtyExitEvent, PtyOutputEvent};
 use crate::persist::Persister;
 use crate::pty::{OutputSink, PtyManager};
 use crate::state::Model;
 
+/// How often buffered PTY output is flushed to the frontend. Small enough to
+/// stay imperceptible while typing, large enough to collapse a burst of tiny
+/// ConPTY reads into a single event.
+const OUTPUT_FLUSH_MS: u64 = 6;
+
+/// PTY output waiting to be sent for one terminal: the bytes buffered since
+/// the last flush and the running byte count at their end.
+#[derive(Default)]
+struct PendingOutput {
+    bytes: Vec<u8>,
+    seq: u64,
+}
+
+/// Coalesces PTY output so a burst of small reads becomes a few Tauri events
+/// instead of hundreds. ConPTY splits output into many little chunks, and one
+/// IPC event per chunk is what used to jank the webview thread while typing.
+/// Output is still delivered whole and in order; only the event count drops.
+#[derive(Default)]
+struct OutputBuffers {
+    pending: Mutex<HashMap<String, PendingOutput>>,
+    flushing: AtomicBool,
+}
+
 pub const LINKS_CHANGED_EVENT: &str = "links-changed";
+pub const KNOWLEDGE_BASES_CHANGED_EVENT: &str = "knowledge-bases-changed";
 
 pub fn pty_output_event(terminal_id: &str) -> String {
     format!("pty-output-{terminal_id}")
@@ -42,21 +67,60 @@ impl<R: Runtime> Events for AppHandle<R> {
     }
 }
 
+/// Delivers events to the webview without ever blocking the caller.
+///
+/// Tauri's `emit` runs on the calling thread, and while the webview is busy —
+/// exactly when the user is dragging or resizing on the canvas — it can stall
+/// until the webview is free again. Backend worker threads must never wait on
+/// that: a bridge request that emits (e.g. `godesk kb` lighting its arrow via
+/// [`Shared::emit_links`]) would otherwise hang until the agent's `godesk`
+/// command times out. Here every event is handed to one background thread that
+/// emits them in order, so producers return at once and a busy webview only
+/// delays delivery, never the Rust side.
+pub struct AsyncEmitter {
+    tx: std::sync::mpsc::Sender<(String, serde_json::Value)>,
+}
+
+impl AsyncEmitter {
+    pub fn new<R: Runtime>(handle: AppHandle<R>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(String, serde_json::Value)>();
+        let spawned = thread::Builder::new().name("godesk-emit".into()).spawn(move || {
+            for (event, payload) in rx {
+                if let Err(err) = Emitter::emit(&handle, &event, payload) {
+                    eprintln!("godesk: cannot emit {event}: {err}");
+                }
+            }
+        });
+        if let Err(err) = spawned {
+            eprintln!("godesk: cannot start the event sender: {err}");
+        }
+        Self { tx }
+    }
+}
+
+impl Events for AsyncEmitter {
+    fn send(&self, event: &str, payload: serde_json::Value) {
+        // The receiver is gone only once the app is shutting down, when a
+        // dropped event no longer matters.
+        let _ = self.tx.send((event.to_owned(), payload));
+    }
+}
+
 /// State shared by commands and PTY threads.
 pub struct Shared {
     pub events: Box<dyn Events>,
     pub model: Arc<Mutex<Model>>,
-    pub detector: Mutex<LinkDetector>,
     pub persister: Persister,
+    output: OutputBuffers,
 }
 
 impl Shared {
-    pub fn model(&self) -> MutexGuard<'_, Model> {
-        self.model.lock().expect("model lock poisoned")
+    pub fn new(events: Box<dyn Events>, model: Arc<Mutex<Model>>, persister: Persister) -> Self {
+        Self { events, model, persister, output: OutputBuffers::default() }
     }
 
-    fn detector(&self) -> MutexGuard<'_, LinkDetector> {
-        self.detector.lock().expect("detector lock poisoned")
+    pub fn model(&self) -> MutexGuard<'_, Model> {
+        self.model.lock().expect("model lock poisoned")
     }
 
     pub(crate) fn emit(&self, event: &str, payload: impl Serialize) {
@@ -70,104 +134,122 @@ impl Shared {
         self.emit(LINKS_CHANGED_EVENT, LinksChangedEvent { workspace_id: workspace_id.to_owned(), links });
     }
 
-    /// Runs a detector pass for `terminal_id` and records the resulting
-    /// links. `pair` maps each peer id the detector returns to
-    /// `(source, target)`.
-    fn detect(
-        &self,
-        terminal_id: &str,
-        run: impl FnOnce(&mut LinkDetector, &[Peer], u64) -> Vec<String>,
-        pair: impl Fn(&str) -> (String, String),
-    ) {
-        let now = now_ms();
-        let mut model = self.model();
-        let (workspace_id, peers) = match model.peers_of(terminal_id) {
-            Some((ws, peers)) => (ws.to_owned(), run(&mut self.detector(), &peers, now)),
-            None => return,
+    pub fn emit_knowledge_bases(&self, workspace_id: &str, knowledge_bases: Vec<KnowledgeBase>) {
+        self.emit(
+            KNOWLEDGE_BASES_CHANGED_EVENT,
+            KnowledgeBasesChangedEvent { workspace_id: workspace_id.to_owned(), knowledge_bases },
+        );
+    }
+
+    /// Buffers a PTY chunk for `terminal_id` and makes sure the flush loop is
+    /// running, so bursts of tiny reads reach the frontend as a few events.
+    fn push_output(self: &Arc<Self>, terminal_id: &str, chunk: &[u8], seq: u64) {
+        {
+            let mut pending = self.output.pending.lock().expect("output lock poisoned");
+            let entry = pending.entry(terminal_id.to_owned()).or_default();
+            entry.bytes.extend_from_slice(chunk);
+            entry.seq = seq;
+        }
+        if !self.output.flushing.swap(true, Ordering::AcqRel) {
+            let shared = self.clone();
+            if thread::Builder::new().name("godesk-output-flush".into()).spawn(move || shared.flush_loop()).is_err() {
+                // Without a flush thread, never hold output back: clear the
+                // flag so a later chunk retries, and send what is buffered now.
+                self.output.flushing.store(false, Ordering::Release);
+                self.flush_output();
+            }
+        }
+    }
+
+    fn flush_loop(&self) {
+        loop {
+            thread::sleep(Duration::from_millis(OUTPUT_FLUSH_MS));
+            self.flush_output();
+        }
+    }
+
+    /// Emits one `pty-output` event per terminal with everything buffered for
+    /// it, in order, carrying the byte count at the end of the batch.
+    fn flush_output(&self) {
+        let drained: Vec<(String, PendingOutput)> = {
+            let mut pending = self.output.pending.lock().expect("output lock poisoned");
+            pending.drain().filter(|(_, p)| !p.bytes.is_empty()).collect()
         };
-        let mut changed = false;
-        for peer in peers {
-            let (source, target) = pair(&peer);
-            changed |= model.touch_link(&workspace_id, &source, &target, now);
-        }
-        if changed {
-            let links = model.links_of(&workspace_id);
-            drop(model);
-            self.emit_links(&workspace_id, links);
-        }
-    }
-
-    /// Output from `source` that mentions a peer links source → peer.
-    pub fn observe_output(&self, source: &str, chunk: &[u8]) {
-        self.detect(
-            source,
-            |detector, peers, now| detector.observe_output(source, chunk, peers, now),
-            |peer| (source.to_owned(), peer.to_owned()),
-        );
-    }
-
-    /// Input to `target` that a peer just produced links peer → target.
-    pub fn observe_input(&self, target: &str, data: &[u8]) {
-        self.detect(
-            target,
-            |detector, peers, now| detector.observe_input(target, data, peers, now),
-            |peer| (peer.to_owned(), target.to_owned()),
-        );
-    }
-
-    pub fn forget_terminal(&self, terminal_id: &str) {
-        self.detector().forget(terminal_id);
-    }
-
-    /// Removes idle detected links and notifies the affected workspaces.
-    pub fn expire_links(&self) {
-        let mut model = self.model();
-        let changed: Vec<_> = model
-            .expire_detected_links(now_ms())
-            .into_iter()
-            .map(|ws| {
-                let links = model.links_of(&ws);
-                (ws, links)
-            })
-            .collect();
-        drop(model);
-        for (ws, links) in changed {
-            self.emit_links(&ws, links);
+        for (id, out) in drained {
+            self.emit(&pty_output_event(&id), PtyOutputEvent { data: BASE64.encode(&out.bytes), seq: out.seq });
         }
     }
 }
 
-/// Forwards PTY output to the frontend (one event name per terminal) and to
-/// link detection.
+/// Forwards PTY output to the frontend, coalesced per terminal.
 pub struct CoreSink(pub Arc<Shared>);
 
 impl OutputSink for CoreSink {
     fn on_output(&self, terminal_id: &str, chunk: &[u8], seq: u64) {
-        self.0.emit(&pty_output_event(terminal_id), PtyOutputEvent { data: BASE64.encode(chunk), seq });
-        self.0.observe_output(terminal_id, chunk);
+        self.0.push_output(terminal_id, chunk, seq);
     }
 
     fn on_exit(&self, terminal_id: &str, exit_code: Option<u32>) {
+        // Nothing buffered may follow an exit unseen: flush, then signal.
+        self.0.flush_output();
         self.0.emit(&pty_exit_event(terminal_id), PtyExitEvent { exit_code });
     }
 }
 
 /// Managed Tauri state.
+#[derive(Clone)]
 pub struct Core {
     pub shared: Arc<Shared>,
     pub ptys: PtyManager,
+    /// What each terminal was doing, for a restart.
+    pub sessions: Arc<crate::session::SessionStore>,
+    /// The user's home, where agents keep their sessions.
+    pub home: std::path::PathBuf,
+    /// The coding agents the terminals show (see [`crate::agent_session`]).
+    pub agents: crate::agent_session::AgentSessions,
+    /// Whether an agent started in a shell is shown by Godesk instead of
+    /// running on its own screen.
+    pub agent_view: Arc<std::sync::atomic::AtomicBool>,
+    /// Terminals whose agent the user sent back to its own screen, and
+    /// when: left alone while it runs there.
+    pub classic: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// The folders the terminals work in, ranked by frecency (see [`crate::dirs`]).
+    pub dirs: Arc<crate::dirs::DirStore>,
+    /// Knowledge bases' indexes and extracted text (see [`crate::knowledge`]).
+    pub kb: crate::knowledge::KbStore,
+    /// The app's data folder (where the offline voice model is kept).
+    pub data_dir: std::path::PathBuf,
 }
 
-#[cfg(test)]
+/// Tells the frontend what the agents write and when they stop.
+pub struct AgentEvents {
+    pub shared: Arc<Shared>,
+    pub sessions: crate::agent_session::AgentSessions,
+}
+
+impl crate::agent_session::AgentSink for AgentEvents {
+    fn on_line(&self, terminal_id: &str, line: &str) {
+        // Numbered, so a window that reads the history meanwhile skips what
+        // it already has.
+        let seq = self.sessions.remember(terminal_id, line);
+        self.shared.emit(&format!("agent-line-{terminal_id}"), serde_json::json!({ "seq": seq, "line": line }));
+    }
+
+    fn on_exit(&self, terminal_id: &str, code: Option<i32>) {
+        self.shared.emit(&format!("agent-exit-{terminal_id}"), code);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
-    //! End-to-end backend pipeline: real shells, the real sink, link
-    //! detection and the model, with a recorder in place of the Tauri app.
+    //! End-to-end backend pipeline: real shells, the real sink and the model,
+    //! with a recorder in place of the Tauri app.
 
     use std::thread;
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::model::{LinkKind, Rect};
+    use crate::model::Rect;
     use crate::pty::{PtyConfig, SpawnRequest};
 
     #[derive(Default)]
@@ -205,74 +287,56 @@ mod tests {
         false
     }
 
-    fn has_link(shared: &Shared, ws: &str, source: &str, target: &str) -> bool {
-        shared
-            .model()
-            .links_of(ws)
-            .iter()
-            .any(|l| l.source_id == source && l.target_id == target && l.kind == LinkKind::Detected)
-    }
-
     /// The backend with `/bin/sh` shells that start in `home`, and a
     /// recorder in place of the Tauri app.
     fn backend(home: &std::path::Path) -> (Arc<Recorder>, Arc<Shared>, PtyManager) {
         let recorder = Arc::new(Recorder::default());
         let model = Arc::new(Mutex::new(Model::default()));
-        let shared = Arc::new(Shared {
-            events: Box::new(recorder.clone()),
-            persister: Persister::spawn(home.join("state.json"), model.clone()),
-            model,
-            detector: Mutex::new(LinkDetector::default()),
-        });
-        let config = PtyConfig { home: home.to_owned(), shell_override: Some(vec!["/bin/sh".into()]) };
+        let shared = Arc::new(Shared::new(
+            Box::new(recorder.clone()),
+            model.clone(),
+            Persister::spawn(home.join("state.json"), model),
+        ));
+        let config =
+            PtyConfig { home: home.to_owned(), shell_override: Some(vec!["/bin/sh".into()]), ..PtyConfig::default() };
         let ptys = PtyManager::new(config, Arc::new(CoreSink(shared.clone())));
         (recorder, shared, ptys)
     }
 
     #[test]
-    fn shell_output_and_relayed_input_create_detected_links() {
+    fn shell_output_arrives_as_ordered_coalesced_events() {
         let dir = tempfile::tempdir().unwrap();
         let (recorder, shared, ptys) = backend(dir.path());
 
         let rect = Rect { x: 0.0, y: 0.0, width: 640.0, height: 400.0 };
-        let (ws, planner, coder) = {
+        let (ws, planner) = {
             let mut m = shared.model();
             let ws = m.active_workspace_id().to_owned();
             let planner = m.add_terminal(&ws, rect).unwrap().id;
-            let coder = m.add_terminal(&ws, rect).unwrap().id;
             m.rename_terminal(&planner, "planner").unwrap();
-            m.rename_terminal(&coder, "coder").unwrap();
-            (ws, planner, coder)
+            (ws, planner)
         };
-        for (id, name) in [(&planner, "planner"), (&coder, "coder")] {
-            let req =
-                SpawnRequest { terminal_id: id, terminal_name: name, workspace_id: &ws, cwd: None, cols: 80, rows: 24 };
-            ptys.spawn(&req).unwrap();
-        }
+        let req = SpawnRequest {
+            terminal_id: &planner,
+            terminal_name: "planner",
+            workspace_id: &ws,
+            cwd: None,
+            history: None,
+            cols: 80,
+            rows: 24,
+        };
+        ptys.spawn(&req).unwrap();
 
-        // The shell sees its own identity, and output arrives as base64 events.
+        // The shell sees its own identity, and its output arrives as base64
+        // events flushed by the coalescer.
         ptys.write(&planner, b"echo \"me=$GODESK_TERMINAL_NAME\"\n".to_vec()).unwrap();
         assert!(eventually(|| recorder.output_of(&planner).contains("me=planner")));
-        assert!(shared.model().links_of(&ws).is_empty(), "mentioning itself links nothing");
 
-        // planner's output names coder: planner -> coder.
-        ptys.write(&planner, b"echo handing the parser to coder\n".to_vec()).unwrap();
-        assert!(eventually(|| has_link(&shared, &ws, &planner, &coder)));
-        let events = recorder.payloads(LINKS_CHANGED_EVENT);
-        assert_eq!(events.last().unwrap()["workspaceId"], ws.as_str());
-
-        // coder prints a line and the user pastes it into planner: coder -> planner.
-        ptys.write(&coder, b"echo result-7f3a9c ready\n".to_vec()).unwrap();
-        assert!(eventually(|| recorder.output_of(&coder).contains("result-7f3a9c ready")));
-        let pasted = b"result-7f3a9c ready".to_vec();
-        shared.observe_input(&planner, &pasted);
-        ptys.write(&planner, pasted).unwrap();
-        assert!(has_link(&shared, &ws, &coder, &planner));
-
-        // Every output event carries a growing byte count.
+        // Each coalesced event carries the growing byte count at its end.
         let seqs: Vec<u64> =
-            recorder.payloads(&pty_output_event(&coder)).iter().map(|p| p["seq"].as_u64().unwrap()).collect();
-        assert!(seqs.windows(2).all(|w| w[0] < w[1]));
+            recorder.payloads(&pty_output_event(&planner)).iter().map(|p| p["seq"].as_u64().unwrap()).collect();
+        assert!(!seqs.is_empty());
+        assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
 
         ptys.close_all();
     }
@@ -290,7 +354,15 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let project = project.canonicalize().unwrap();
         let (_, shared, ptys) = backend(dir.path());
-        let core = Core { shared: shared.clone(), ptys: ptys.clone() };
+        let core = Core {
+            shared: shared.clone(),
+            ptys: ptys.clone(),
+            sessions: Arc::new(crate::session::SessionStore::new(dir.path())),
+            home: dir.path().to_owned(),
+            agents: crate::agent_session::AgentSessions::kept_in(dir.path().join("agents")),
+            agent_view: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            classic: Arc::default(),
+        };
 
         let rect = Rect { x: 0.0, y: 0.0, width: 640.0, height: 400.0 };
         let source = {
