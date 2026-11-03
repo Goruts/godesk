@@ -19,7 +19,7 @@ Your own terminal's name is in `$GODESK_TERMINAL_NAME` and its id in `$GODESK_TE
 
 To talk to another terminal, run the real `godesk` command in your own shell — the same way you run any other command. It is a normal program on your PATH, not a tool call or an API: never invent a JSON message, a file, or any other channel to reach another terminal. There is no other way to reach one.
 
-- `godesk list` — the terminals connected to you (those an arrow joins to yours) and what runs in each. Run this first when unsure of a name; names match without regard to case.
+- `godesk list` — the other terminals of your workspace and what runs in each; `[connected]` marks those an arrow already joins to yours. Run this first when unsure of a name; names match without regard to case.
 - `godesk send \"<terminal>\" \"<message>\"` — types the message into that terminal and presses Enter: this is how you ask the agent there to do something. The message is sent as one line.
 - `godesk read \"<terminal>\" [lines]` — prints the end of its output, for example to see its answer.
 
@@ -28,7 +28,7 @@ A terminal can also be connected to a knowledge base: a folder of documents (not
 - `godesk kb read \"<file>\"` — print a document's text (use `godesk kb read \"<base>\" \"<file>\"` when several are connected). Godesk turns PDFs and Office files into text for you.
 Read a knowledge base when it would help with the task. You can reach it only while its arrow is connected; once the arrow is removed, you can no longer read it.
 
-You can only reach a terminal that an arrow connects to yours; `godesk list` shows exactly those. If the terminal you want is not listed, you are not connected to it: tell the user to draw an arrow between the two terminals in Godesk, then try again.";
+You can reach any terminal of your own workspace by its name, with no arrow drawn first. When the user asks you to lead or coordinate other terminals, or a task is better split between them, act as the orchestrator: give each terminal its part with `godesk send`, check their progress with `godesk read`, and ask them to report back to you by your name. The first time you message or read a terminal, Godesk draws the arrow between your windows on its own, so the user sees who instructs whom, and the other terminal can answer you back. Terminals of other workspaces cannot be reached.";
 
 /// The instruction files of the agents Godesk knows, under `home`.
 fn files(home: &Path) -> [PathBuf; 2] {
