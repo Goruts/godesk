@@ -1,4 +1,4 @@
-# Builds Godesk for Windows, macOS and Linux when a version tag (v0.1.0, v0.2.0...)
+# Builds Godesk for Windows and Linux when a version tag (v0.1.0, v0.2.0...)
 # is pushed, and attaches the installers to a draft GitHub release for that tag.
 # Publish the draft once every platform has finished.
 name: Release
@@ -19,9 +19,6 @@ jobs:
         include:
           - platform: windows-latest
             args: "--bundles nsis"
-          # One universal build runs on both Apple silicon and Intel Macs.
-          - platform: macos-latest
-            args: "--target universal-apple-darwin"
           - platform: ubuntu-22.04
             args: ""
     runs-on: ${{ matrix.platform }}
@@ -43,8 +40,6 @@ jobs:
             frontend/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -67,10 +62,11 @@ jobs:
             Download the installer for your system below.
 
             - **Windows:** `Godesk_*_x64-setup.exe`
-            - **macOS** (Apple silicon and Intel): `Godesk_*_universal.dmg`
             - **Linux:** `.AppImage`, `.deb` or `.rpm`
 
-            The installers are not code-signed yet. On Windows, choose **More info → Run anyway** in SmartScreen. On macOS, right-click the app and choose **Open** the first time.
+            macOS is not supported yet.
+
+            The installers are not code-signed yet. On Windows, choose **More info → Run anyway** in SmartScreen.
 
             Free for personal use and small companies under the PolyForm Small Business License. Larger companies need a commercial license: see COMMERCIAL.md.
           releaseDraft: true
