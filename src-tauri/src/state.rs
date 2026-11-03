@@ -476,8 +476,8 @@ impl Model {
 
     /// Lights up the manual link between `source` and `target` (in either
     /// direction) when they interact, so the arrow pulses with live traffic.
-    /// Does not create anything: an arrow is a permission the user draws, and
-    /// without one the two terminals cannot reach each other at all. Returns
+    /// Does not create anything: the bridge draws the arrow first, with
+    /// [`Model::add_manual_link`], the first time one terminal names another. Returns
     /// true when the frontend should be told: the refresh falls in a new
     /// [`LINK_ACTIVITY_THROTTLE_MS`] period, so steady traffic is reported
     /// about once per period and `lastActivityAt` never lags by more than that.

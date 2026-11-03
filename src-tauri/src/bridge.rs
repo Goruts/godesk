@@ -8,8 +8,11 @@
 //!   and presses Enter, as a person would.
 //! - `godesk read <terminal> [lines]` prints the end of its output.
 //!
-//! Each use is an interaction, so it creates or refreshes the detected link
-//! between the two terminals (sender → receiver; read terminal → reader).
+//! A terminal names any other terminal of its workspace, so an agent can hand
+//! work to another by name without the user drawing anything first. The first
+//! time it does, Godesk draws the arrow itself (sender → receiver; read
+//! terminal → reader): the canvas shows who instructs whom, and the receiver
+//! can answer back. Later uses light that arrow up with the traffic.
 //!
 //! The endpoint is plain HTTP on 127.0.0.1 with a random token that only
 //! Godesk's shells know (`GODESK_TOKEN`). A web page cannot call it: it
@@ -343,31 +346,41 @@ fn terminals(shared: &Shared, from: &str) -> Vec<Target> {
         .collect()
 }
 
-/// Whether `from` is one of Godesk's terminals, and so bound by the arrows.
-/// A caller that is not (an external tool using the `godesk` command) is not
-/// gated and reaches every terminal.
-fn gated(shared: &Shared, from: &str) -> bool {
+/// Whether `from` is one of Godesk's terminals. Only those get arrows drawn
+/// for them: an external tool using the `godesk` command has no node on the
+/// canvas to draw from.
+fn on_canvas(shared: &Shared, from: &str) -> bool {
     shared.model().workspace_of(from).is_some()
 }
 
-/// The terminals an arrow connects to the caller: the only ones it may send
-/// to or read from. Drawing or deleting an arrow in Godesk is what opens or
-/// closes the channel.
+/// The terminals the caller can reach: every other terminal of its workspace
+/// (or every terminal, for a caller that is not on the canvas). Workspaces
+/// stay apart: a terminal never reaches into another workspace.
 fn reachable(shared: &Shared, from: &str) -> Vec<Target> {
-    let gated = gated(shared, from);
-    terminals(shared, from).into_iter().filter(|t| t.id != from && (!gated || shared.model().are_linked(from, &t.id))).collect()
+    terminals(shared, from).into_iter().filter(|t| t.id != from).collect()
 }
 
-/// Rejects a target the caller is not allowed to reach, so send and read
-/// obey the arrows even though any terminal can be named.
-fn ensure_reachable(shared: &Shared, from: &str, target: &Target) -> Result<(), String> {
-    if !gated(shared, from) || shared.model().are_linked(from, &target.id) {
-        return Ok(());
+/// Draws the arrow `source → target` the first time the caller delegates to
+/// (or reads from) a terminal it has no arrow with yet, and tells the
+/// frontend. The arrow is a real one: it is saved with the workspace, the
+/// user can delete it, and it lets the receiver answer back by name.
+fn connect(shared: &Shared, from: &str, workspace_id: &str, source: &str, target: &str) {
+    if !on_canvas(shared, from) {
+        return;
     }
-    Err(format!(
-        "godesk: no arrow connects you to {}. Draw one between the terminals in Godesk to talk to it.",
-        target.name
-    ))
+    let mut model = shared.model();
+    if model.are_linked(source, target) {
+        return;
+    }
+    match model.add_manual_link(source, target, now_ms()) {
+        Ok(_) => {
+            let links = model.links_of(workspace_id);
+            drop(model);
+            shared.persister.mark_dirty();
+            shared.emit_links(workspace_id, links);
+        }
+        Err(err) => eprintln!("godesk: cannot draw the arrow {source} -> {target}: {err}"),
+    }
 }
 
 /// The terminal `query` names: its exact name (any case), its id, or the
@@ -437,13 +450,16 @@ fn touch_node(shared: &Shared, node_id: &str, from: &str) {
 fn list(shared: &Shared, reach: &Reach, from: &str) -> String {
     let reachable = reachable(shared, from);
     if reachable.is_empty() {
-        return "No terminals are connected to you. Draw an arrow between two terminals in Godesk to let them talk."
+        return "You are the only terminal in this workspace. Open more terminals in Godesk to hand them work."
             .to_owned();
     }
-    let mut out = String::from("Terminals connected to you (use the name with `godesk send` or `godesk read`):\n");
+    let mut out = String::from(
+        "Terminals in your workspace (name them with `godesk send` or `godesk read`; Godesk draws the arrow the first time):\n",
+    );
     for t in reachable {
+        let arrow = if shared.model().are_linked(from, &t.id) { "  [connected]" } else { "" };
         if let Some(agent) = reach.agents.agent(&t.id) {
-            out.push_str(&format!("  {}  running {} (send it a prompt)\n", t.name, agent.program()));
+            out.push_str(&format!("  {}  running {} (send it a prompt){arrow}\n", t.name, agent.program()));
             continue;
         }
         let program = reach
@@ -453,7 +469,7 @@ fn list(shared: &Shared, reach: &Reach, from: &str) -> String {
             .and_then(|argv| argv.first().cloned())
             .map(|p| Path::new(&p).file_stem().map_or(p.clone(), |s| s.to_string_lossy().into_owned()));
         let note = program.map_or_else(|| "  idle shell".to_owned(), |program| format!("  running {program}"));
-        out.push_str(&format!("  {}{note}\n", t.name));
+        out.push_str(&format!("  {}{note}{arrow}\n", t.name));
     }
     out
 }
@@ -467,7 +483,7 @@ fn send(shared: &Shared, reach: &Reach, from: &str, body: &str) -> Result<String
     }
     let text = typeable(message)?;
     let target = resolve(shared, from, to)?;
-    ensure_reachable(shared, from, &target)?;
+    connect(shared, from, &target.workspace_id, from, &target.id);
     if reach.agents.is_open(&target.id) {
         // The terminal shows its agent: the message is the agent's prompt,
         // not something for the shell under it.
@@ -500,7 +516,7 @@ fn typeable(message: &str) -> Result<String, String> {
 
 fn read(shared: &Shared, reach: &Reach, from: &str, name: &str, lines: usize) -> Result<String, String> {
     let target = resolve(shared, from, name)?;
-    ensure_reachable(shared, from, &target)?;
+    connect(shared, from, &target.workspace_id, &target.id, from);
     // The terminal shows its agent: what it said, not the shell under it.
     if let Some(transcript) = reach.agents.transcript(&target.id, lines) {
         touch(shared, &target.workspace_id, &target.id, from);
@@ -1040,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn an_arrow_gates_who_the_terminals_can_reach() {
+    fn naming_a_terminal_reaches_it_and_draws_the_arrow() {
         let dir = tempfile::tempdir().unwrap();
         let model = Arc::new(Mutex::new(Model::default()));
         let shared =
@@ -1094,10 +1110,16 @@ mod tests {
             })
         };
 
-        // `godesk list` shows only the terminals connected to the caller.
+        // `godesk list` shows every terminal of the workspace and marks the
+        // ones an arrow already joins to the caller.
         ptys.write(&one.id, b"godesk list\r".to_vec()).unwrap();
-        assert!(eventually(|| output(&ptys, &one.id).contains("Terminal 2  idle shell")), "{}", output(&ptys, &one.id));
-        assert!(!output(&ptys, &one.id).contains("Terminal 3"), "an unconnected terminal is not listed");
+        assert!(
+            eventually(|| output(&ptys, &one.id).contains("Terminal 2  idle shell  [connected]")),
+            "{}",
+            output(&ptys, &one.id)
+        );
+        assert!(eventually(|| output(&ptys, &one.id).contains("Terminal 3  idle shell")), "{}", output(&ptys, &one.id));
+        assert!(!output(&ptys, &one.id).contains("Terminal 3  idle shell  [connected]"));
 
         ptys.write(&one.id, "godesk send 'Terminal 2' 'hello world & ñandú'\r".as_bytes().to_vec()).unwrap();
         assert!(eventually(|| output(&ptys, &one.id).contains("Sent to Terminal 2.")), "{}", output(&ptys, &one.id));
@@ -1107,11 +1129,32 @@ mod tests {
         ptys.write(&one.id, b"godesk read 'terminal 2' 5\r".to_vec()).unwrap();
         assert!(eventually(|| output(&ptys, &one.id).contains("--- last output of Terminal 2 ---")));
 
-        // With no arrow to Terminal 3, Terminal 1 cannot reach it, and the
-        // shell under Terminal 3 is never written to.
-        ptys.write(&one.id, b"godesk send 'Terminal 3' 'should be refused'\r".to_vec()).unwrap();
-        assert!(eventually(|| output(&ptys, &one.id).contains("no arrow connects")), "{}", output(&ptys, &one.id));
-        assert!(!output(&ptys, &three.id).contains("should be refused"));
+        // With no arrow to Terminal 3, naming it still reaches it, and Godesk
+        // draws the arrow Terminal 1 -> Terminal 3 so the canvas shows the
+        // delegation and Terminal 3 can answer back.
+        assert!(!shared.model().are_linked(&one.id, &three.id));
+        ptys.write(&one.id, b"godesk send 'Terminal 3' 'build the orders endpoint'\r".to_vec()).unwrap();
+        assert!(eventually(|| output(&ptys, &one.id).contains("Sent to Terminal 3.")), "{}", output(&ptys, &one.id));
+        assert!(eventually(|| output(&ptys, &three.id).contains("build the orders endpoint")), "{}", output(&ptys, &three.id));
+        let drawn = shared
+            .model()
+            .links_of(&ws)
+            .iter()
+            .any(|l| l.kind == LinkKind::Manual && l.source_id == one.id && l.target_id == three.id);
+        assert!(drawn, "the arrow points from the sender to the receiver");
+        // The receiver answers back over the arrow that was drawn for it,
+        // without a second arrow being added.
+        ptys.write(&three.id, b"godesk send 'Terminal 1' 'done'\r".to_vec()).unwrap();
+        assert!(eventually(|| output(&ptys, &three.id).contains("Sent to Terminal 1.")), "{}", output(&ptys, &three.id));
+        let between = |a: &str, b: &str| {
+            shared
+                .model()
+                .links_of(&ws)
+                .iter()
+                .filter(|l| (l.source_id == a && l.target_id == b) || (l.source_id == b && l.target_id == a))
+                .count()
+        };
+        assert_eq!(between(&one.id, &three.id), 1, "one arrow per pair");
 
         // Git Bash, which Claude Code runs its commands in on Windows.
         let bash = PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
