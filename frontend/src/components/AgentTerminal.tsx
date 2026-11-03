@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
 import { AGENTS, AgentStream, agentId, formatDuration, formatTokens, shortPath } from "../agent/protocol";
 import type { AgentId, AgentState } from "../agent/protocol";
@@ -14,6 +14,9 @@ type Props = { terminalId: string; agent: string | null | undefined };
 
 /** How close to the end the log must be to follow what comes next. */
 const FOLLOW_SLACK = 64;
+/** Conversation items drawn at once. Earlier ones load on demand, so a long
+ *  conversation keeps a small page and stays fast to stream and to scroll. */
+const WINDOW = 150;
 
 /** What a message the user writes asks of Godesk's view instead of the agent. */
 export type CommandKind = "model" | "shell" | "classic" | "restart" | "stop" | "usage" | "status" | "help";
@@ -213,6 +216,12 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
   const logRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const followRef = useRef(true);
+  // The first item drawn; null follows the end (the newest WINDOW items).
+  const [windowStart, setWindowStart] = useState<number | null>(null);
+  // After earlier items load above, keep the reader's place; after a jump,
+  // scroll to that item once it is drawn.
+  const anchorRef = useRef<{ height: number; top: number } | null>(null);
+  const targetRef = useRef<number | "top" | null>(null);
   const notify = useAppStore((s) => s.notify);
   const detachAgent = useAppStore((s) => s.detachAgent);
   const agentToClassic = useAppStore((s) => s.agentToClassic);
@@ -231,12 +240,26 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
     let seen: number | null = null;
     const held: Array<[string, number]> = [];
     const cleanups: Array<() => void> = [];
+    // Lines are applied to the view at most once per frame: an agent streams
+    // many lines a second, and each render of a long conversation costs a
+    // layout of the whole thread.
+    let frame: number | undefined;
+    const flush = () => {
+      frame = undefined;
+      if (!disposed) setState(stream.current);
+    };
+    const schedule = () => {
+      if (frame === undefined) frame = requestAnimationFrame(flush);
+    };
 
     void (async () => {
       const unlistenLine = await events.onAgentLine(terminalId, (line, seq) => {
         if (disposed) return;
         if (seen === null) held.push([line, seq]);
-        else if (seq > seen) setState(stream.pushLine(line));
+        else if (seq > seen) {
+          stream.pushLine(line);
+          schedule();
+        }
       });
       const unlistenExit = await events.onAgentExit(terminalId, () => {
         if (!disposed) setState(stream.stop());
@@ -269,6 +292,7 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
 
     return () => {
       disposed = true;
+      if (frame !== undefined) cancelAnimationFrame(frame);
       for (const cleanup of cleanups.reverse()) cleanup();
     };
   }, [terminalId, agent]);
@@ -289,11 +313,39 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
     };
   }, [terminalId]);
 
-  // Follow the newest line, unless the user scrolled up to read.
+  // Only the newest WINDOW items are drawn while following; reading or
+  // jumping freezes the window where it is, so nothing shifts under the eye.
+  const total = state.items.length;
+  const start = windowStart ?? Math.max(0, total - WINDOW);
+  const prompts = useMemo(
+    () => state.items.flatMap((item, index) => (item.kind === "prompt" ? [{ index, text: item.text }] : [])),
+    [state.items],
+  );
+
+  const scrollToItem = (log: HTMLDivElement, target: number | "top") => {
+    if (target === "top") log.scrollTop = 0;
+    else log.querySelector<HTMLElement>(`[data-item="${target}"]`)?.scrollIntoView({ block: "start" });
+  };
+
+  // Follow the newest line, unless the user scrolled up to read; keep the
+  // reader's place when earlier items load above; land on a jump's target.
   useLayoutEffect(() => {
     const log = logRef.current;
-    if (log && followRef.current) log.scrollTop = log.scrollHeight;
-  }, [state, error]);
+    if (!log) return;
+    const anchor = anchorRef.current;
+    if (anchor) {
+      anchorRef.current = null;
+      log.scrollTop = anchor.top + (log.scrollHeight - anchor.height);
+      return;
+    }
+    const target = targetRef.current;
+    if (target !== null) {
+      targetRef.current = null;
+      scrollToItem(log, target);
+      return;
+    }
+    if (followRef.current) log.scrollTop = log.scrollHeight;
+  }, [state, error, start]);
 
   const onScroll = () => {
     const log = logRef.current;
@@ -301,6 +353,8 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
     const follow = log.scrollHeight - log.scrollTop - log.clientHeight < FOLLOW_SLACK;
     followRef.current = follow;
     if (follow !== following) setFollowing(follow);
+    // Reading back: stop the window from sliding as new items arrive.
+    if (!follow && windowStart === null) setWindowStart(start);
   };
 
   const jumpToEnd = () => {
@@ -308,7 +362,73 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
     if (!log) return;
     followRef.current = true;
     setFollowing(true);
-    log.scrollTo({ top: log.scrollHeight, behavior: "smooth" });
+    setWindowStart(null);
+    log.scrollTop = log.scrollHeight;
+  };
+
+  /** Draws the WINDOW items before the first one shown, keeping the place. */
+  const showEarlier = () => {
+    const log = logRef.current;
+    if (log) anchorRef.current = { height: log.scrollHeight, top: log.scrollTop };
+    followRef.current = false;
+    setFollowing(false);
+    setWindowStart(Math.max(0, start - WINDOW));
+  };
+
+  /** Scrolls to an item (or the top), drawing it first if it is not yet. */
+  const jumpTo = (target: number | "top") => {
+    const log = logRef.current;
+    if (!log) return;
+    followRef.current = false;
+    setFollowing(false);
+    const first = target === "top" ? 0 : Math.max(0, target - 2);
+    if (first < start) {
+      targetRef.current = target;
+      setWindowStart(first);
+      return;
+    }
+    if (windowStart === null) setWindowStart(start);
+    scrollToItem(log, target);
+  };
+
+  /** The index of the first item at the top of the view. */
+  const itemAtTop = () => {
+    const log = logRef.current;
+    if (!log) return total;
+    const top = log.getBoundingClientRect().top + 8;
+    for (const node of log.querySelectorAll<HTMLElement>("[data-item]")) {
+      if (node.getBoundingClientRect().bottom > top) return Number(node.dataset.item);
+    }
+    return total;
+  };
+
+  const previousPrompt = () => {
+    const at = itemAtTop();
+    const found = [...prompts].reverse().find((p) => p.index < at);
+    jumpTo(found ? found.index : "top");
+  };
+
+  const nextPrompt = () => {
+    const at = itemAtTop();
+    const found = prompts.find((p) => p.index > at);
+    if (found) jumpTo(found.index);
+    else jumpToEnd();
+  };
+
+  // Alt+Up / Alt+Down move between your messages; Alt+Home / Alt+End go to
+  // the start and the end of the conversation, wherever the focus is.
+  const onViewKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const actions: Record<string, () => void> = {
+      ArrowUp: previousPrompt,
+      ArrowDown: nextPrompt,
+      Home: () => jumpTo("top"),
+      End: jumpToEnd,
+    };
+    const action = actions[e.key];
+    if (!action) return;
+    e.preventDefault();
+    action();
   };
 
   /** The field grows with what is written in it, up to its own height. */
@@ -646,7 +766,7 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
     state.items.some((i) => i.kind === "permission" && i.status === "pending");
 
   return (
-    <div className="agent-view" data-agent={agent} data-status={state.status}>
+    <div className="agent-view" data-agent={agent} data-status={state.status} onKeyDown={onViewKeyDown}>
       <div className="agent-head">
         <span className="agent-badge">
           <AgentMark agent={agent} />
@@ -683,8 +803,14 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
         </button>
       </div>
 
+      <div className="agent-log-wrap">
       <div className="agent-log" ref={logRef} onScroll={onScroll}>
         <div className="agent-thread">
+          {start > 0 ? (
+            <button type="button" className="agent-earlier" onClick={showEarlier}>
+              Show {Math.min(WINDOW, start)} earlier · {start} hidden
+            </button>
+          ) : null}
           {state.items.length === 0 ? (
             <div className="agent-welcome">
               <span className="agent-welcome-mark">
@@ -706,8 +832,10 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
               </div>
             </div>
           ) : (
-            state.items.map((item, i) => (
-              <AgentEntry key={i} item={item} agent={agent} cwd={state.cwd} onPermission={answerPermission} />
+            state.items.slice(start).map((item, i) => (
+              <div key={start + i} className="agent-item" data-item={start + i}>
+                <AgentEntry item={item} agent={agent} cwd={state.cwd} onPermission={answerPermission} />
+              </div>
             ))
           )}
           {working && !showsItself ? (
@@ -729,6 +857,42 @@ export function AgentTerminal({ terminalId, agent: agentName }: Props) {
             </div>
           ) : null}
         </div>
+      </div>
+
+      {/* A map of your messages: one mark each, placed by where it falls in the
+          conversation. Click one to go there. */}
+      {prompts.length > 1 ? (
+        <nav className="agent-rail" aria-label="Your messages">
+          {prompts.map((p, n) => (
+            <button
+              key={p.index}
+              type="button"
+              className="agent-rail-mark"
+              style={{ top: `${(p.index / Math.max(1, total)) * 100}%` }}
+              title={p.text.length > 140 ? `${p.text.slice(0, 140)}…` : p.text}
+              aria-label={`Message ${n + 1}: ${p.text.slice(0, 80)}`}
+              onClick={() => jumpTo(p.index)}
+            />
+          ))}
+        </nav>
+      ) : null}
+
+      {total > 6 ? (
+        <div className="agent-nav" data-visible={!following || undefined}>
+          <button type="button" title="Start of the conversation (Alt+Home)" aria-label="Start of the conversation" onClick={() => jumpTo("top")}>
+            ⤒
+          </button>
+          <button type="button" title="Previous message (Alt+↑)" aria-label="Previous message" onClick={previousPrompt}>
+            ↑
+          </button>
+          <button type="button" title="Next message (Alt+↓)" aria-label="Next message" onClick={nextPrompt}>
+            ↓
+          </button>
+          <button type="button" title="Latest (Alt+End)" aria-label="Latest" onClick={jumpToEnd}>
+            ⤓
+          </button>
+        </div>
+      ) : null}
       </div>
 
       {!following ? (
