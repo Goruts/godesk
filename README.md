@@ -57,8 +57,7 @@ Cambiar de workspace no mata procesos: las terminales ocultas siguen ejecutándo
 
 | Línea | Significado |
 |---|---|
-| Azul continua, flecha en el destino | Link **manual** dibujado por ti. Se guarda en `state.json` |
-| Ámbar discontinua, flecha en el destino | Link **detectado** a partir del tráfico. No se guarda; desaparece tras **30 s** sin actividad |
+| Blue solid, arrowhead at the target | A link drawn by hand, or by Godesk the first time an agent delegates to another terminal. Saved in `state.json` |
 | Más gruesa, animada y con halo | Actividad reciente (últimos 5 s), sea manual o detectado |
 | Atenuada | Sin actividad reciente |
 | Blanca | Seleccionada (Supr para borrarla) |
@@ -185,34 +184,32 @@ npm run gen:types    # = cd src-tauri && cargo test export_bindings
 - Un archivo que no se puede leer o parsear se mueve a `state.json.corrupt-<timestamp>` y la app arranca con un workspace vacío. El aviso solo sale por stderr. Los links colgantes y los valores fuera de rango se reparan al cargar.
 - Para probar sin tocar tu estado real en Linux: `XDG_DATA_HOME=/tmp/godesk-prueba npm run dev`.
 
-## Detección de links
+## Links and delegation
 
-En `src-tauri/src/links.rs`, dos señales crean o refrescan un link **detectado** de A a B (siempre dentro del mismo workspace):
+An arrow between two terminals is a channel the agents in them can talk over. There are two ways to get one:
 
-1. **Mención.** La salida de A contiene el **nombre** de B (sin distinguir mayúsculas, como palabra completa, de al menos 3 caracteres) o su **id**. Antes se quitan las secuencias de escape, y un nombre partido entre dos lecturas también cuenta.
-2. **Relay (reenvío).** El texto que se escribe en B lo produjo A en los últimos **4 s**. Cubre copiar la respuesta de un agente y pegarla o enviarla a otro. La entrada debe tener al menos 8 caracteres; se comparan sus últimos 64 tras normalizar espacios y mayúsculas.
+1. **Drawn by hand.** Drag the handle **●** on the right edge of a window onto another window.
+2. **Drawn by Godesk when an agent delegates.** Any terminal can reach every other terminal of **its own workspace** by name, with no arrow drawn first. The first time it hands work to another one with `godesk send`, Godesk draws the arrow sender → receiver; the first `godesk read` draws read terminal → reader. The canvas then shows who instructs whom, and the receiver can answer back by name.
 
-**Comando `godesk`.** Cada shell trae en su PATH un comando `godesk` para que lo que corre en una terminal (Claude Code, Codex o cualquier otro programa) llegue a otra:
+Both kinds are the same kind of arrow: saved in `state.json`, lit up while traffic flows over them, and deletable. Terminals of different workspaces never reach each other. Only an explicit `godesk` call draws an arrow; nothing is guessed from a terminal's output (`src-tauri/src/bridge.rs`, `connect`).
+
+**The `godesk` command.** Every shell has a `godesk` command on its PATH so that whatever runs in a terminal (Claude Code, Codex or any other program) can reach another one:
 
 ```
-godesk list                        # terminales del workspace y qué corre en cada una
-godesk send <terminal> <mensaje>   # escribe el mensaje en esa terminal y pulsa Enter
-godesk read <terminal> [líneas]    # imprime el final de su salida
+godesk list                        # the other terminals of the workspace, what runs in each, [connected] when an arrow exists
+godesk send <terminal> <message>   # types the message into that terminal and presses Enter
+godesk read <terminal> [lines]     # prints the end of its output
 ```
 
-Cada uso crea o refresca el link detectado (`send`: emisor → receptor; `read`: leída → lectora). El nombre se busca sin distinguir mayúsculas, o por la única terminal cuyo nombre lo contiene. Un mensaje de varias líneas se envía en una sola, y el Enter va 150 ms después para que TUIs como Claude Code lo tomen como envío y no como pegado. Detrás hay un endpoint HTTP en `127.0.0.1` (`src-tauri/src/bridge.rs`) con un token aleatorio que solo conocen las shells de Godesk (`GODESK_PORT`, `GODESK_TOKEN`). Los scripts (`godesk` para sh/Git Bash con curl, `godesk.ps1` para PowerShell y `godesk.cmd` para cmd.exe) se escriben en `<datos de la app>/bin` en cada arranque. En PowerShell corre el `.ps1`, que recibe los argumentos sin que `cmd.exe` los vuelva a partir: un mensaje con `&` o con acentos llega entero. En cmd.exe hay que entrecomillarlo con comillas dobles, porque `cmd.exe` corta la línea en el `&` antes de que el script la vea. Un agente solo lo usa si sabe que existe. En ⋯ → *Agents know the terminals by name*, Godesk agrega una nota entre marcadores `<!-- godesk:begin -->`/`<!-- godesk:end -->` a las instrucciones globales de Claude Code (`~/.claude/CLAUDE.md`) y de Codex (`~/.codex/AGENTS.md`): les dice que, si `GODESK_TERMINAL_ID` está definido, los nombres de las barras de título ("Terminal 3") son terminales del lienzo y cómo usar `godesk`. Apagarlo quita solo ese bloque (`src-tauri/src/agents.rs`).
+A terminal is named without regard to case, or by the only terminal whose name contains the text. A message of several lines is sent as one, and Enter goes 150 ms later so that TUIs such as Claude Code take it as a submission rather than a paste. Behind it is an HTTP endpoint on `127.0.0.1` (`src-tauri/src/bridge.rs`) with a random token that only Godesk's shells know (`GODESK_PORT`, `GODESK_TOKEN`). The scripts (`godesk` for sh/Git Bash with curl, `godesk.ps1` for PowerShell and `godesk.cmd` for cmd.exe) are written to `<app data>/bin` on every start.
 
-Si ya existe un link en ese sentido (manual o detectado), se refresca su actividad en vez de duplicarlo. La detección funciona también en los workspaces que no están visibles.
+**Orchestrating.** An agent only uses `godesk` if it knows it exists. With ⋯ → *Agents know the terminals by name*, Godesk adds a note between `<!-- godesk:begin -->`/`<!-- godesk:end -->` markers to the global instructions of Claude Code (`~/.claude/CLAUDE.md`) and Codex (`~/.codex/AGENTS.md`). It tells them the title-bar names are terminals of the canvas, how to use `godesk`, and that when asked to lead or coordinate other terminals they should hand each one its part with `godesk send`, follow up with `godesk read` and ask them to report back. Turning it off removes only that block (`src-tauri/src/agents.rs`).
 
-Constantes ajustables (`links.rs`):
+Adjustable constant (`links.rs`):
 
-| Constante | Valor | Para qué |
+| Constant | Value | Purpose |
 |---|---|---|
-| `DETECTED_LINK_TTL_MS` | 30 000 | Inactividad tras la que desaparece un link detectado |
-| `INPUT_CORRELATION_WINDOW_MS` | 4 000 | Cuánto tiempo cuenta una salida para la señal de relay |
-| `MIN_NAME_CHARS` | 3 | Los nombres más cortos se ignoran para las menciones |
-| `MIN_RELAY_CHARS` | 8 | Una entrada más corta nunca dispara un relay |
-| `LINK_ACTIVITY_THROTTLE_MS` | 1 000 | Un link ya visible envía como mucho una actualización por periodo, aunque el tráfico sea continuo |
+| `LINK_ACTIVITY_THROTTLE_MS` | 1 000 | A visible arrow sends at most one update per period, even under continuous traffic |
 
 ### Límites y falsos positivos conocidos
 
