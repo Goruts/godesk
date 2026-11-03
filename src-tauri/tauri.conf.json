@@ -30,6 +30,9 @@
     "active": true,
     "targets": "all",
     "category": "DeveloperTool",
+    "copyright": "Copyright Goruts",
+    "license": "PolyForm-Small-Business-1.0.0",
+    "licenseFile": "../LICENSE.md",
     "shortDescription": "Infinite canvas of terminals",
     "icon": [
       "icons/32x32.png",

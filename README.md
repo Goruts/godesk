@@ -284,3 +284,7 @@ WEBKIT_INSPECTOR_HTTP_SERVER=127.0.0.1:9223 ./src-tauri/target/debug/godesk   # 
 ```
 
 Abre `http://127.0.0.1:9223` para ver el objetivo inspeccionable. El mismo WebSocket (`/socket/1/1/WebPage`) permite ejecutar JavaScript dentro de la app real para pruebas de extremo a extremo.
+
+## License
+
+Godesk is source-available under the [PolyForm Small Business License 1.0.0](LICENSE.md): free for personal use and for companies with fewer than 100 people and less than 1,000,000 USD in revenue. Larger companies need a commercial license; see [COMMERCIAL.md](COMMERCIAL.md). Contributions are welcome under the terms in [CONTRIBUTING.md](CONTRIBUTING.md).
