@@ -13,3 +13,6 @@ src-tauri/bindings/
 # Local configuration of coding agents (Claude Code settings, Goia rules, skills).
 .claude/
 .agents/
+
+# Local agent skill registry, generated per machine
+.atl/
